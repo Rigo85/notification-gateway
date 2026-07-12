@@ -123,7 +123,13 @@ $('#test-form').addEventListener('submit', async (e) => {
 });
 
 // ---------- notificaciones ----------
-$('#filter-form').addEventListener('submit', (e) => { e.preventDefault(); loadNotifications(); });
+$('#filter-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  // el detalle abierto corresponde al listado anterior: cerrarlo al filtrar
+  $('#notif-detail').classList.add('hidden');
+  $('#notif-detail').innerHTML = '';
+  loadNotifications();
+});
 
 async function loadNotifications() {
   const form = new FormData($('#filter-form'));
