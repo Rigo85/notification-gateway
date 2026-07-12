@@ -13,6 +13,8 @@ export const config = {
   logLevel: process.env.LOG_LEVEL ?? 'info',
   databaseUrl: required('DATABASE_URL'),
   workerDisabled: process.env.WORKER_DISABLED === 'true',
+  // detrás de un reverse proxy (nginx del VPS): usar X-Forwarded-For como IP real
+  trustProxy: process.env.TRUST_PROXY === 'true',
   smsProvider: process.env.SMS_PROVIDER ?? 'fake',
   goip: {
     baseUrl: process.env.GOIP_BASE_URL ?? '',

@@ -13,6 +13,7 @@ import type { ChannelProvider } from './providers/types.js';
 export interface AppOptions {
   sessionSecret?: string;
   events?: EventEmitter;
+  trustProxy?: boolean;
 }
 
 export function buildApp(
@@ -21,7 +22,7 @@ export function buildApp(
   logLevel = 'info',
   opts: AppOptions = {},
 ): FastifyInstance {
-  const app = Fastify({ logger: { level: logLevel } });
+  const app = Fastify({ logger: { level: logLevel }, trustProxy: opts.trustProxy ?? false });
   const events = opts.events ?? new EventEmitter();
   const sessionSecret = opts.sessionSecret ?? randomBytes(32).toString('hex');
 

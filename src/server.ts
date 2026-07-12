@@ -22,6 +22,7 @@ async function main(): Promise<void> {
   const app = buildApp(db, providers, config.logLevel, {
     sessionSecret: process.env.SESSION_SECRET,
     events,
+    trustProxy: config.trustProxy,
   });
   await migrate(db, (msg) => app.log.info(msg));
 
