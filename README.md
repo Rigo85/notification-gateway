@@ -1,0 +1,81 @@
+# notification-gateway
+
+Gateway interno de notificaciones: los servicios envían por HTTP y el gateway
+despacha por SMS a través de un GOIP de 1 canal (multi-canal a futuro: email, Telegram).
+
+Documentos de diseño:
+
+- `propuesta-notification-gateway-2026-07-11.md` — arquitectura, decisiones y plan por fases.
+- `goip-validacion-2026-07-11.md` — validación del equipo real y reglas del provider.
+- `resumen-goip-2026-07-11.md` — análisis previo del GOIP.
+
+## Stack
+
+Node 22+ / TypeScript / Fastify / PostgreSQL (la tabla `deliveries` es la cola,
+con `FOR UPDATE SKIP LOCKED`; sin Redis a propósito — ver propuesta D1).
+
+## Desarrollo
+
+```bash
+# Postgres local desechable
+docker run -d --name ngw-dev-pg -e POSTGRES_PASSWORD=dev \
+  -e POSTGRES_DB=notification_gateway -p 5433:5432 postgres:16
+
+cp .env.example .env
+npm install
+npm test            # suite de tests contra el PG local
+npm run dev         # server con provider fake (no envía SMS reales)
+```
+
+## Uso
+
+```bash
+# Usuarios del panel /admin (crear o cambiar contraseña; mínimo 8 caracteres)
+npm run create-admin -- admin mi-contraseña-segura
+
+npm run create-key -- mi-servicio 20   # genera API key (límite 20/hora)
+
+curl -X POST localhost:8090/api/notifications \
+  -H "Authorization: Bearer ngw_..." -H "Content-Type: application/json" \
+  -d '{"recipients":["+51987654321"],"message":"Nextcloud dejó de responder",
+       "priority":"high","dedup_key":"nextcloud-down"}'
+```
+
+Endpoints: `POST /api/notifications`, `GET /api/notifications/:id`, `GET /health`.
+
+Estados de una delivery: `queued → processing → sent` con
+`retrying/exhausted/failed/suppressed/cancelled` según el caso.
+Protecciones: dedup por ventana (15 min), límites por hora (global / por
+destinatario / por API key), división de mensajes largos (≤160 ASCII / ≤70 Unicode),
+reintentos 30 s → 2 min → 10 min. Todo configurable en la tabla `settings`.
+
+## Panel /admin
+
+Login con usuario/contraseña (`npm run create-admin`), cookie de sesión firmada
+(7 días), rate limit de login (5 fallos → 15 min). Pestañas: Dashboard (contadores,
+salud del GOIP, envío de prueba), Notificaciones (filtros, detalle, reintentar/cancelar),
+API Keys (crear/revocar) y Configuración (parámetros operativos en caliente).
+Se actualiza en vivo por SSE.
+
+## Despliegue (PM2)
+
+```bash
+# 1. base de datos (una sola vez, en el Postgres existente)
+docker exec <contenedor-postgres> psql -U postgres -c "CREATE DATABASE \"notification_gateway\""
+
+# 2. código y build
+cd ~/notification-gateway
+npm ci && npm run build
+
+# 3. .env de producción (ver .env.example):
+#    DATABASE_URL=postgres://postgres:...@localhost:5432/notification_gateway
+#    SESSION_SECRET=$(openssl rand -hex 32)
+#    SMS_PROVIDER=goip  +  GOIP_BASE_URL/USER/PASSWORD
+
+# 4. migraciones corren solas al arrancar; crear admin y keys:
+npm run create-admin -- admin <contraseña>
+npm run create-key -- <servicio> 20
+
+# 5. arrancar
+pm2 start ecosystem.config.cjs && pm2 save
+```

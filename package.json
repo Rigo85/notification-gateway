@@ -1,0 +1,33 @@
+{
+  "name": "notification-gateway",
+  "version": "0.1.0",
+  "description": "Gateway interno de notificaciones (SMS via GOIP, multi-canal)",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc && cp -r src/web dist/web",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "migrate": "tsx scripts/migrate.ts",
+    "create-key": "tsx scripts/create-api-key.ts",
+    "create-admin": "tsx scripts/create-admin.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.1",
+    "@fastify/static": "^10.1.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.2.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

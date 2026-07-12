@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notification Gateway</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="login-view" class="hidden">
+  <form id="login-form" class="login-card">
+    <h1>Notification Gateway</h1>
+    <label>Usuario <input name="username" autocomplete="username" required></label>
+    <label>Contraseña <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Entrar</button>
+    <p id="login-error" class="error"></p>
+  </form>
+</div>
+
+<div id="main-view" class="hidden">
+  <header>
+    <h1>📡 Notification Gateway</h1>
+    <nav>
+      <button data-tab="dashboard" class="tab active">Dashboard</button>
+      <button data-tab="notifications" class="tab">Notificaciones</button>
+      <button data-tab="keys" class="tab">API Keys</button>
+      <button data-tab="settings" class="tab">Configuración</button>
+    </nav>
+    <div class="header-right">
+      <span id="live-dot" title="Actualización en vivo">●</span>
+      <button id="logout" class="ghost">Salir</button>
+    </div>
+  </header>
+
+  <section id="tab-dashboard" class="tab-content">
+    <div id="provider-health" class="cards"></div>
+    <div id="counters" class="cards"></div>
+    <div class="panel">
+      <h2>Envío de prueba</h2>
+      <form id="test-form" class="inline-form">
+        <input name="recipient" placeholder="+51987654321" required>
+        <input name="message" placeholder="Mensaje de prueba" required>
+        <button type="submit">Enviar</button>
+        <span id="test-result"></span>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>Últimas notificaciones</h2>
+      <table id="recent-table"><thead><tr>
+        <th>Fecha</th><th>Origen</th><th>Mensaje</th><th>Prioridad</th><th>Estado</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <section id="tab-notifications" class="tab-content hidden">
+    <form id="filter-form" class="inline-form">
+      <select name="status">
+        <option value="">— estado —</option>
+        <option>queued</option><option>processing</option><option>sent</option>
+        <option>retrying</option><option>failed</option><option>exhausted</option>
+        <option>suppressed</option><option>cancelled</option>
+      </select>
+      <input name="source" placeholder="origen">
+      <input name="from" type="date"> <input name="to" type="date">
+      <button type="submit">Filtrar</button>
+    </form>
+    <table id="notif-table"><thead><tr>
+      <th>Fecha</th><th>Origen</th><th>Mensaje</th><th>Prioridad</th><th>Estado</th>
+    </tr></thead><tbody></tbody></table>
+    <div id="notif-detail" class="panel hidden"></div>
+  </section>
+
+  <section id="tab-keys" class="tab-content hidden">
+    <div class="panel">
+      <h2>Nueva API key</h2>
+      <form id="key-form" class="inline-form">
+        <input name="name" placeholder="nombre-servicio" pattern="[a-zA-Z0-9._-]+" required>
+        <input name="rate_limit_per_hour" type="number" value="20" min="1" max="1000">
+        <button type="submit">Crear</button>
+      </form>
+      <p id="key-token" class="token hidden"></p>
+    </div>
+    <table id="keys-table"><thead><tr>
+      <th>Nombre</th><th>Límite/h</th><th>Último uso</th><th>Estado</th><th></th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section id="tab-settings" class="tab-content hidden">
+    <div class="panel">
+      <h2>Configuración operativa</h2>
+      <form id="settings-form" class="settings-grid"></form>
+      <button id="settings-save">Guardar</button>
+      <span id="settings-result"></span>
+    </div>
+  </section>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
