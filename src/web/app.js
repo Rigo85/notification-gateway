@@ -114,10 +114,11 @@ $('#test-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = new FormData(e.target);
   const out = $('#test-result');
-  out.textContent = '…';
+  out.textContent = '';
   try {
-    const r = await api('/test-send', { method: 'POST', body: { recipient: form.get('recipient'), message: form.get('message') } });
-    out.textContent = r.queued > 0 ? `encolado (${r.queued})` : `suprimido (${r.suppressed})`;
+    await api('/test-send', { method: 'POST', body: { recipient: form.get('recipient'), message: form.get('message') } });
+    // sin mensaje de éxito: la notificación aparece abajo y se actualiza sola
+    e.target.reset();
   } catch (err) { out.textContent = err.message; }
 });
 
