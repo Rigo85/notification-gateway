@@ -42,6 +42,8 @@ document.querySelectorAll('.tab').forEach((btn) => btn.addEventListener('click',
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b === btn));
   document.querySelectorAll('.tab-content').forEach((s) => s.classList.add('hidden'));
   $(`#tab-${btn.dataset.tab}`).classList.remove('hidden');
+  // el token de una key recién creada solo vive mientras no se navegue
+  $('#key-token').classList.add('hidden');
   refreshTab(btn.dataset.tab);
 }));
 const activeTab = () => document.querySelector('.tab.active').dataset.tab;
@@ -247,6 +249,17 @@ $('#settings-save').addEventListener('click', async () => {
     for (const input of $('#settings-form').querySelectorAll('input')) body[input.name] = JSON.parse(input.value);
     await api('/settings', { method: 'PUT', body });
     out.textContent = 'guardado ✓';
+    setTimeout(() => (out.textContent = ''), 2000);
+  } catch (err) { out.textContent = err.message; }
+});
+
+$('#settings-reset').addEventListener('click', async () => {
+  if (!confirm('¿Restaurar toda la configuración a los valores por defecto?')) return;
+  const out = $('#settings-result');
+  try {
+    await api('/settings/reset', { method: 'POST' });
+    await loadSettings();
+    out.textContent = 'restaurado ✓';
     setTimeout(() => (out.textContent = ''), 2000);
   } catch (err) { out.textContent = err.message; }
 });

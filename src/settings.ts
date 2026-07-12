@@ -10,7 +10,7 @@ export interface Settings {
   per_recipient_hourly_limit: number;
 }
 
-const DEFAULTS: Settings = {
+export const SETTINGS_DEFAULTS: Settings = {
   send_gap_ms: 3000,
   poll_ms: 2000,
   max_attempts: 3,
@@ -26,7 +26,7 @@ let cache: { value: Settings; at: number } | null = null;
 export async function getSettings(db: Db): Promise<Settings> {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.value;
   const { rows } = await db.query<{ key: string; value: unknown }>('SELECT key, value FROM settings');
-  const merged: Settings = { ...DEFAULTS };
+  const merged: Settings = { ...SETTINGS_DEFAULTS };
   for (const row of rows) {
     if (row.key in merged) (merged as unknown as Record<string, unknown>)[row.key] = row.value;
   }

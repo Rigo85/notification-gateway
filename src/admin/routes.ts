@@ -1,7 +1,7 @@
 import type { EventEmitter } from 'node:events';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from '../db.js';
-import { invalidateSettingsCache, getSettings } from '../settings.js';
+import { invalidateSettingsCache, getSettings, SETTINGS_DEFAULTS } from '../settings.js';
 import { enqueueNotification, EnqueueError } from '../enqueue.js';
 import { generateToken, hashToken } from '../auth.js';
 import {
@@ -332,6 +332,18 @@ export function registerAdminRoutes(
       return getSettings(db);
     },
   );
+
+  app.post('/admin/api/settings/reset', { onRequest: requireSession }, async () => {
+    for (const [key, value] of Object.entries(SETTINGS_DEFAULTS)) {
+      await db.query(
+        `INSERT INTO settings (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
+        [key, JSON.stringify(value)],
+      );
+    }
+    invalidateSettingsCache();
+    return getSettings(db);
+  });
 
   // --- SSE: el panel se refresca cuando algo cambia ---
 

@@ -199,6 +199,23 @@ describe('API keys y settings', () => {
     expect(res.json()).not.toHaveProperty('campo_prohibido');
   });
 
+  it('reset de settings restaura los valores por defecto', async () => {
+    await ctx.app.inject({
+      method: 'PUT',
+      url: '/admin/api/settings',
+      headers: withSession(),
+      payload: { dedup_window_s: 5, send_gap_ms: 9999 },
+    });
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/admin/api/settings/reset',
+      headers: withSession(),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dedup_window_s).toBe(900);
+    expect(res.json().send_gap_ms).toBe(3000);
+  });
+
   it('test-send encola con source panel-test', async () => {
     const res = await ctx.app.inject({
       method: 'POST',
