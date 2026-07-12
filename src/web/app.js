@@ -2,7 +2,8 @@
 const $ = (sel) => document.querySelector(sel);
 const api = async (path, opts = {}) => {
   const res = await fetch(`/admin/api${path}`, {
-    headers: { 'content-type': 'application/json' },
+    // content-type solo cuando hay cuerpo: un POST vacío declarado como JSON es 400 en Fastify
+    headers: opts.body ? { 'content-type': 'application/json' } : {},
     credentials: 'same-origin',
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
