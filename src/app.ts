@@ -32,6 +32,7 @@ export function buildApp(
     prefix: '/admin/',
   });
   app.get('/admin', (_req, reply) => reply.redirect('/admin/'));
+  app.get('/', (_req, reply) => reply.redirect('/admin/'));
 
   registerRoutes(app, db, providers, events);
   registerAdminRoutes(app, db, providers, { sessionSecret, events });
