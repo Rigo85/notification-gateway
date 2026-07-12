@@ -6,7 +6,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc && cp -r src/web dist/web",
+    "build": "tsc && rm -rf dist/web && cp -r src/web dist/web",
     "start": "node dist/server.js",
     "test": "vitest run",
     "migrate": "tsx scripts/migrate.ts",
