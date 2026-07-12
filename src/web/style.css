@@ -52,6 +52,10 @@ nav { display: flex; gap: 4px; flex: 1; }
   padding: 16px; margin-bottom: 16px; overflow-x: auto; }
 .panel h2 { margin: 0 0 12px; font-size: 15px; }
 .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.inline-form input, .inline-form select { flex: 1 1 140px; min-width: 0; }
+.inline-form input[name="message"] { flex: 3 1 220px; }
+.inline-form button { flex: 0 0 auto; }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; }
 
 /* tables */
 table { width: 100%; border-collapse: collapse; background: var(--panel);
@@ -78,3 +82,24 @@ td.msg { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow:
 .detail-grid dt { color: var(--muted); } .detail-grid dd { margin: 0; word-break: break-word; }
 .actions { display: flex; gap: 6px; }
 .actions button { padding: 3px 10px; font-size: 12.5px; }
+
+/* ---------- móvil ---------- */
+@media (max-width: 640px) {
+  header { padding: 8px 10px; gap: 6px; }
+  header h1 { font-size: 15px; flex: 1; }
+  /* las pestañas pasan a una segunda fila con scroll horizontal propio */
+  nav { order: 3; flex: 1 1 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tab { padding: 8px 10px; white-space: nowrap; font-size: 14px; }
+  .tab-content { padding: 10px; }
+  .panel { padding: 12px; }
+  .cards { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .card { padding: 10px; }
+  .card .num { font-size: 20px; }
+  th, td { padding: 6px; font-size: 13px; }
+  td.msg { max-width: 45vw; }
+  .settings-grid { grid-template-columns: 1fr; gap: 2px; max-width: none; }
+  .settings-grid input { margin-bottom: 10px; }
+  .detail-grid { grid-template-columns: 1fr; gap: 2px; }
+  .detail-grid dt { margin-top: 6px; }
+  .login-card { width: 92vw; max-width: 340px; padding: 24px; }
+}
