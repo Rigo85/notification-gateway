@@ -50,6 +50,7 @@ const activeTab = () => document.querySelector('.tab.active').dataset.tab;
 function refreshTab(tab) {
   if (tab === 'dashboard') loadDashboard();
   else if (tab === 'notifications') loadNotifications();
+  else if (tab === 'inbound') loadInbound();
   else if (tab === 'keys') loadKeys();
   else if (tab === 'settings') loadSettings();
 }
@@ -193,6 +194,22 @@ async function showDetail(id) {
   box.scrollIntoView({ behavior: 'smooth' });
 }
 
+// ---------- entrantes ----------
+$('#inbound-filter').addEventListener('submit', (e) => { e.preventDefault(); loadInbound(); });
+
+async function loadInbound() {
+  const sender = new FormData($('#inbound-filter')).get('sender');
+  const params = sender ? `?sender=${encodeURIComponent(sender)}` : '';
+  const data = await api(`/inbound${params}`);
+  $('#inbound-table tbody').innerHTML = data.messages.map((m) => `
+    <tr>
+      <td>${fmtDate(m.received_at)}</td>
+      <td>${esc(m.device_time ?? '—')}</td>
+      <td>${esc(m.sender)}</td>
+      <td class="msg" title="${esc(m.body)}">${esc(m.body)}</td>
+    </tr>`).join('');
+}
+
 // ---------- API keys ----------
 async function loadKeys() {
   const data = await api('/keys');
@@ -235,6 +252,7 @@ const SETTING_LABELS = {
   dedup_window_s: 'Ventana de dedup (s)',
   global_hourly_limit: 'Límite global por hora',
   per_recipient_hourly_limit: 'Límite por destinatario/hora',
+  inbound_poll_ms: 'Poll de entrantes (ms)',
 };
 async function loadSettings() {
   const s = await api('/settings');

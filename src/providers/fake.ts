@@ -1,4 +1,4 @@
-import type { ChannelProvider, DeliveryJob, HealthStatus, SendResult } from './types.js';
+import type { ChannelProvider, DeliveryJob, HealthStatus, InboundSms, SendResult } from './types.js';
 
 export interface FakeBehavior {
   latencyMs?: number;
@@ -31,5 +31,12 @@ export class FakeProvider implements ChannelProvider {
 
   async health(): Promise<HealthStatus> {
     return { ok: true, detail: { provider: 'fake' } };
+  }
+
+  /** bandeja de entrada simulada: los tests inyectan mensajes aquí */
+  inbox: InboundSms[] = [];
+
+  async fetchInbox(): Promise<InboundSms[]> {
+    return [...this.inbox];
   }
 }

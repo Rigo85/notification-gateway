@@ -19,8 +19,17 @@ export interface HealthStatus {
   detail?: Record<string, unknown>;
 }
 
+export interface InboundSms {
+  sender: string;
+  body: string;
+  /** hora reportada por el equipo (sin año), referencial */
+  deviceTime: string;
+}
+
 export interface ChannelProvider {
   readonly channel: string;
   send(job: DeliveryJob): Promise<SendResult>;
   health(): Promise<HealthStatus>;
+  /** lee los mensajes entrantes visibles (sin consumirlos del equipo) */
+  fetchInbox?(): Promise<InboundSms[]>;
 }

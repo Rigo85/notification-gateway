@@ -318,6 +318,7 @@ export function registerAdminRoutes(
         'dedup_window_s',
         'global_hourly_limit',
         'per_recipient_hourly_limit',
+        'inbound_poll_ms',
       ]);
       const entries = Object.entries(req.body).filter(([k]) => editable.has(k));
       if (!entries.length) return reply.code(400).send({ error: 'Nada editable en el cuerpo' });
@@ -330,6 +331,29 @@ export function registerAdminRoutes(
       }
       invalidateSettingsCache();
       return getSettings(db);
+    },
+  );
+
+  // --- SMS entrantes ---
+
+  app.get<{ Querystring: { limit?: number; sender?: string } }>(
+    '/admin/api/inbound',
+    { onRequest: requireSession },
+    async (req) => {
+      const limit = Math.min(Number(req.query.limit ?? 100), 500);
+      const params: unknown[] = [];
+      let where = '';
+      if (req.query.sender) {
+        params.push(`%${req.query.sender}%`);
+        where = `WHERE sender ILIKE $1`;
+      }
+      const { rows } = await db.query(
+        `SELECT id, channel, sender, body, device_time, received_at, parsed_as_command
+         FROM inbound_messages ${where}
+         ORDER BY received_at DESC LIMIT ${limit}`,
+        params,
+      );
+      return { messages: rows };
     },
   );
 

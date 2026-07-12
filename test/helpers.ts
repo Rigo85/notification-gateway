@@ -31,7 +31,9 @@ export async function setupContext(): Promise<TestContext> {
 }
 
 export async function resetData(db: Db, token: string): Promise<void> {
-  await db.query('TRUNCATE deliveries, notifications, api_keys, users RESTART IDENTITY CASCADE');
+  await db.query(
+    'TRUNCATE deliveries, notifications, api_keys, users, inbound_messages RESTART IDENTITY CASCADE',
+  );
   await db.query(
     `UPDATE settings SET value = d.v::jsonb FROM (VALUES
       ('send_gap_ms', '3000'), ('poll_ms', '2000'), ('max_attempts', '3'),

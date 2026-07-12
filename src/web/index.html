@@ -23,6 +23,7 @@
     <nav>
       <button data-tab="dashboard" class="tab active">Dashboard</button>
       <button data-tab="notifications" class="tab">Notificaciones</button>
+      <button data-tab="inbound" class="tab">Entrantes</button>
       <button data-tab="keys" class="tab">API Keys</button>
       <button data-tab="settings" class="tab">Configuración</button>
     </nav>
@@ -68,6 +69,16 @@
       <th>Fecha</th><th>Origen</th><th>Mensaje</th><th>Prioridad</th><th>Estado</th>
     </tr></thead><tbody></tbody></table>
     <div id="notif-detail" class="panel hidden"></div>
+  </section>
+
+  <section id="tab-inbound" class="tab-content hidden">
+    <form id="inbound-filter" class="inline-form">
+      <input name="sender" placeholder="remitente">
+      <button type="submit">Filtrar</button>
+    </form>
+    <table id="inbound-table"><thead><tr>
+      <th>Recibido</th><th>Hora del equipo</th><th>Remitente</th><th>Mensaje</th>
+    </tr></thead><tbody></tbody></table>
   </section>
 
   <section id="tab-keys" class="tab-content hidden">

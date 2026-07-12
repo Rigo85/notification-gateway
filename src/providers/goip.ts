@@ -1,5 +1,5 @@
 import http from 'node:http';
-import type { ChannelProvider, DeliveryJob, HealthStatus, SendResult } from './types.js';
+import type { ChannelProvider, DeliveryJob, HealthStatus, InboundSms, SendResult } from './types.js';
 
 // Provider para GoIP-1 (firmware GHSFVT-1.1-67, Hybertone).
 // Comportamiento validado con el equipo real — ver goip-validacion §3, §5:
@@ -142,6 +142,40 @@ export class GoipProvider implements ChannelProvider {
     } catch (err) {
       return { ok: false, detail: { error: err instanceof Error ? err.message : String(err) } };
     }
+  }
+
+  /**
+   * Inbox del equipo: la página embebe los mensajes en un array JS
+   * `sms= ["MM-DD HH:MM:SS,remitente,cuerpo", ...]` (goip-validacion §3.3).
+   * El cuerpo puede contener comas: solo se cortan las 2 primeras.
+   * Lectura pura; la dedup la hace el poller con hash persistente.
+   */
+  async fetchInbox(): Promise<InboundSms[]> {
+    const html = await this.httpText(
+      `${this.cfg.baseUrl}/default/en_US/tools.html?type=sms_inbox&line=1&pos=-1`,
+    );
+    const match = html.match(/sms\s*=\s*(\[[\s\S]*?\])\s*;/);
+    if (!match) return [];
+    let entries: unknown;
+    try {
+      entries = JSON.parse(match[1]!);
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(entries)) return [];
+    const result: InboundSms[] = [];
+    for (const raw of entries) {
+      if (typeof raw !== 'string') continue;
+      const c1 = raw.indexOf(',');
+      const c2 = raw.indexOf(',', c1 + 1);
+      if (c1 < 0 || c2 < 0) continue;
+      result.push({
+        deviceTime: raw.slice(0, c1).trim(),
+        sender: raw.slice(c1 + 1, c2).trim(),
+        body: raw.slice(c2 + 1),
+      });
+    }
+    return result;
   }
 
   private async fetchSendStatus(): Promise<Record<string, string>> {

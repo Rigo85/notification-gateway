@@ -8,6 +8,7 @@ export interface Settings {
   dedup_window_s: number;
   global_hourly_limit: number;
   per_recipient_hourly_limit: number;
+  inbound_poll_ms: number;
 }
 
 export const SETTINGS_DEFAULTS: Settings = {
@@ -18,6 +19,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   dedup_window_s: 900,
   global_hourly_limit: 30,
   per_recipient_hourly_limit: 10,
+  inbound_poll_ms: 10_000,
 };
 
 const CACHE_TTL_MS = 10_000;
