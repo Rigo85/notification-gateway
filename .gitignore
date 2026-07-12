@@ -146,5 +146,8 @@ vite.config.ts.timestamp-*
 goip-validacion-2026-07-11.md
 resumen-goip-2026-07-11.md
 propuesta-notification-gateway-2026-07-11.md
+resumen-*.md
+propuesta-*.md
+goip-*.md
 .claude
 .idea
