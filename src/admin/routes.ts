@@ -350,7 +350,7 @@ export function registerAdminRoutes(
       const { rows } = await db.query(
         `SELECT id, channel, sender, body, device_time, received_at, parsed_as_command
          FROM inbound_messages ${where}
-         ORDER BY received_at DESC LIMIT ${limit}`,
+         ORDER BY date_trunc('second', received_at) DESC, device_time DESC LIMIT ${limit}`,
         params,
       );
       return { messages: rows };

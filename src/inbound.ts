@@ -59,7 +59,9 @@ export class InboundPoller {
     for (const [channel, provider] of this.providers) {
       if (!provider.fetchInbox) continue;
       const messages = await provider.fetchInbox();
-      for (const msg of messages) {
+      // el equipo lista el más nuevo primero: insertar del más viejo al más
+      // nuevo para que received_at respete la cronología dentro de un lote
+      for (const msg of [...messages].reverse()) {
         const hash = createHash('sha256')
           .update(`${channel}|${msg.deviceTime}|${msg.sender}|${msg.body}`)
           .digest('hex');
