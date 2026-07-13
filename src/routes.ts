@@ -1,6 +1,8 @@
 import type { EventEmitter } from 'node:events';
 import type { FastifyInstance } from 'fastify';
 import type { Db } from './db.js';
+import { getQueueMetrics, getQueueState } from './queue-guard.js';
+import { getSettings } from './settings.js';
 import { makeAuthHook } from './auth.js';
 import { EnqueueError, enqueueNotification } from './enqueue.js';
 import type { ChannelProvider } from './providers/types.js';
@@ -31,6 +33,7 @@ export function registerRoutes(
   db: Db,
   providers: Map<string, ChannelProvider>,
   events?: EventEmitter,
+  systemAlertRecipients: string[] = [],
 ): void {
   const authHook = makeAuthHook(db);
 
@@ -54,12 +57,25 @@ export function registerRoutes(
         ok = false;
       }
     }
-    const { rows } = await db.query<{ pending: string; oldest_s: string | null }>(
-      `SELECT count(*) AS pending,
-              extract(epoch FROM now() - min(created_at))::int::text AS oldest_s
-       FROM deliveries WHERE status IN ('queued', 'retrying', 'processing')`,
-    );
-    checks.queue = { pending: Number(rows[0]?.pending ?? 0), oldest_pending_s: rows[0]?.oldest_s ? Number(rows[0].oldest_s) : 0 };
+    try {
+      const settings = await getSettings(db);
+      const queue = await getQueueMetrics(db);
+      const queueState = getQueueState(queue, settings);
+      checks.queue = {
+        state: queueState,
+        pending: queue.pendingTotal,
+        ready: queue.ready,
+        oldest_pending_s: queue.oldestPendingS,
+        oldest_ready_s: queue.oldestReadyS,
+        estimated_drain_s: queue.estimatedDrainS,
+        normal_limit: settings.queue_normal_limit,
+        absolute_limit: settings.queue_normal_limit + settings.queue_critical_reserve,
+      };
+      if (queueState === 'critical_only' || queueState === 'full') ok = false;
+    } catch (err) {
+      checks.queue = { state: 'unknown', error: String(err) };
+      ok = false;
+    }
     return { ok, checks };
   });
 
@@ -74,15 +90,26 @@ export function registerRoutes(
       try {
         const result = await enqueueNotification(db, {
           source: key.name,
+          apiKeyId: key.id,
+          keyWarningRateLimit: key.warningRateLimitPerHour,
           keyRateLimit: key.rateLimitPerHour,
           recipients: req.body.recipients,
           message: req.body.message,
           channel: req.body.channel,
           priority: req.body.priority,
           dedupKey: req.body.dedup_key,
+          systemAlertRecipients,
         });
+        logRateLimitEvents(req.log, result.rateLimitEvents);
         events?.emit('change');
         if (result.kind === 'suppressed_dedup') {
+          if (result.suppressionReasons.length) {
+            return sendAdmissionRejection(reply, req.body.priority, result.notificationId, result.suppressionReasons, {
+              reason: 'dedup_of_rejected',
+              window_remaining_s: result.windowRemainingS,
+              suppressed_count: result.suppressedCount,
+            });
+          }
           return reply.code(200).send({
             notification_id: result.notificationId,
             status: 'suppressed',
@@ -91,11 +118,21 @@ export function registerRoutes(
             suppressed_count: result.suppressedCount,
           });
         }
+        if (result.queued === 0 && result.suppressed > 0) {
+          return sendAdmissionRejection(
+            reply,
+            req.body.priority,
+            result.notificationId,
+            result.suppressionReasons,
+            { deliveries_suppressed: result.suppressed, invalid_recipients: result.invalidRecipients },
+          );
+        }
         return reply.code(202).send({
           notification_id: result.notificationId,
           status: result.queued > 0 ? 'queued' : 'suppressed',
           deliveries_queued: result.queued,
           deliveries_suppressed: result.suppressed,
+          suppression_reasons: result.suppressionReasons,
           invalid_recipients: result.invalidRecipients,
         });
       } catch (err) {
@@ -127,6 +164,32 @@ export function registerRoutes(
       return { ...notif, deliveries };
     },
   );
+}
+
+function sendAdmissionRejection(
+  reply: { code: (statusCode: number) => { header: (name: string, value: string) => unknown; send: (body: object) => unknown } },
+  priority: string,
+  notificationId: string,
+  reasons: string[],
+  extra: Record<string, unknown>,
+): unknown {
+  const critical = priority === 'critical';
+  const response = reply.code(critical ? 503 : 429);
+  if (critical) response.header('retry-after', '60');
+  return response.send({
+    notification_id: notificationId,
+    status: 'suppressed',
+    reasons,
+    retryable: critical,
+    ...extra,
+  });
+}
+
+function logRateLimitEvents(
+  log: { warn: (obj: object, msg: string) => void },
+  rateLimitEvents: Array<object>,
+): void {
+  for (const rateLimit of rateLimitEvents) log.warn({ rateLimit }, 'umbral de rate limit alcanzado');
 }
 
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

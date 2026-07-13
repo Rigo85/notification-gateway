@@ -6,6 +6,7 @@ export interface ApiKeyInfo {
   id: number;
   name: string;
   channelsAllowed: string[];
+  warningRateLimitPerHour: number;
   rateLimitPerHour: number;
 }
 
@@ -35,11 +36,12 @@ export function makeAuthHook(db: Db) {
       id: number;
       name: string;
       channels_allowed: string[];
+      warning_limit_per_hour: number;
       rate_limit_per_hour: number;
     }>(
       `UPDATE api_keys SET last_used_at = now()
        WHERE key_hash = $1 AND enabled
-       RETURNING id, name, channels_allowed, rate_limit_per_hour`,
+       RETURNING id, name, channels_allowed, warning_limit_per_hour, rate_limit_per_hour`,
       [hashToken(token)],
     );
     const key = rows[0];
@@ -51,6 +53,7 @@ export function makeAuthHook(db: Db) {
       id: key.id,
       name: key.name,
       channelsAllowed: key.channels_allowed,
+      warningRateLimitPerHour: key.warning_limit_per_hour,
       rateLimitPerHour: key.rate_limit_per_hour,
     };
   };

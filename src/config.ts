@@ -1,9 +1,19 @@
 import 'dotenv/config';
+import { normalizeRecipient } from './sms-text.js';
 
 function required(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Falta la variable de entorno ${name}`);
   return v;
+}
+
+function recipients(name: string): string[] {
+  const values = (process.env[name] ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+  return values.map((value) => {
+    const normalized = normalizeRecipient(value);
+    if (!normalized) throw new Error(`${name} contiene un destinatario inválido`);
+    return normalized;
+  }).filter((value, index, all) => all.indexOf(value) === index);
 }
 
 export const config = {
@@ -13,6 +23,7 @@ export const config = {
   logLevel: process.env.LOG_LEVEL ?? 'info',
   databaseUrl: required('DATABASE_URL'),
   workerDisabled: process.env.WORKER_DISABLED === 'true',
+  systemAlertRecipients: recipients('SYSTEM_ALERT_RECIPIENTS'),
   // detrás de un reverse proxy (nginx del VPS): usar X-Forwarded-For como IP real
   trustProxy: process.env.TRUST_PROXY === 'true',
   smsProvider: process.env.SMS_PROVIDER ?? 'fake',

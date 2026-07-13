@@ -24,6 +24,7 @@ async function main(): Promise<void> {
     sessionSecret: process.env.SESSION_SECRET,
     events,
     trustProxy: config.trustProxy,
+    systemAlertRecipients: config.systemAlertRecipients,
   });
   await migrate(db, (msg) => app.log.info(msg));
 

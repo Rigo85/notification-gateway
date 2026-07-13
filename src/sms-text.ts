@@ -19,32 +19,71 @@ export interface SmsPart {
   parts: number;
 }
 
-export function splitSmsText(text: string): SmsPart[] {
-  const clean = text.trim();
-  const limit = maxSmsLen(clean);
-  if (clean.length <= limit) return [{ payload: clean, part: 1, parts: 1 }];
+export class SmsTextTooLongError extends Error {
+  readonly maxParts = 9;
 
-  // Reservar espacio para el prefijo "i/N " (máx. "9/9 " = 4 chars; tope 9 partes)
-  const chunkLimit = limit - 4;
-  const chunks: string[] = [];
-  let rest = clean;
-  while (rest.length > 0 && chunks.length < 9) {
-    if (rest.length <= chunkLimit) {
-      chunks.push(rest);
-      break;
-    }
-    // cortar en el último espacio dentro del límite si existe
-    let cut = rest.lastIndexOf(' ', chunkLimit);
-    if (cut < chunkLimit * 0.5) cut = chunkLimit;
-    chunks.push(rest.slice(0, cut).trimEnd());
-    rest = rest.slice(cut).trimStart();
+  constructor() {
+    super('El mensaje excede el máximo de 9 SMS');
   }
-  // si quedó texto tras 9 partes, se trunca (un SMS de alerta jamás debería llegar aquí)
-  return chunks.map((payload, i) => ({
-    payload: `${i + 1}/${chunks.length} ${payload}`,
-    part: i + 1,
-    parts: chunks.length,
-  }));
+}
+
+export function splitSmsText(text: string): SmsPart[] {
+  const limit = maxSmsLen(text);
+  if (smsUnits(text) <= limit) return [{ payload: text, part: 1, parts: 1 }];
+
+  for (let expectedParts = 2; expectedParts <= 9; expectedParts++) {
+    const chunks = splitForPartCount(text, limit, expectedParts);
+    if (chunks && chunks.length === expectedParts) {
+      return chunks.map((chunk, i) => ({
+        payload: `${i + 1}/${expectedParts} ${chunk}`,
+        part: i + 1,
+        parts: expectedParts,
+      }));
+    }
+  }
+
+  throw new SmsTextTooLongError();
+}
+
+function splitForPartCount(text: string, limit: number, expectedParts: number): string[] | null {
+  const chunks: string[] = [];
+  let offset = 0;
+  for (let i = 1; i <= expectedParts && offset < text.length; i++) {
+    const prefix = `${i}/${expectedParts} `;
+    const capacity = limit - smsUnits(prefix);
+    const end = chunkEnd(text, offset, capacity);
+    if (end <= offset) return null;
+    chunks.push(text.slice(offset, end));
+    offset = end;
+  }
+  return offset === text.length ? chunks : null;
+}
+
+function chunkEnd(text: string, start: number, capacity: number): number {
+  let units = 0;
+  let end = start;
+  let lastWhitespaceEnd = -1;
+
+  for (const char of text.slice(start)) {
+    const nextUnits = units + smsUnits(char);
+    if (nextUnits > capacity) break;
+    units = nextUnits;
+    end += char.length;
+    if (/\s/u.test(char)) lastWhitespaceEnd = end;
+  }
+
+  if (end === text.length) return end;
+  if (lastWhitespaceEnd > start && lastWhitespaceEnd - start >= (end - start) / 2) {
+    return lastWhitespaceEnd;
+  }
+  return end;
+}
+
+function smsUnits(text: string): number {
+  // En modo conservador UCS-2, un carácter fuera del BMP ocupa dos unidades.
+  let units = 0;
+  for (const char of text) units += char.length;
+  return units;
 }
 
 // E.164 laxo: dígitos con + opcional, 7-15 dígitos, sin 0 inicial.

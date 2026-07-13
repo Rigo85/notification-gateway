@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Worker } from '../src/worker.js';
+import { enqueueNotification } from '../src/enqueue.js';
 import {
   authHeaders,
   drainQueue,
@@ -126,10 +127,28 @@ describe('deduplicación', () => {
     const res = await post({ recipients: ['+51987654321'], message: 'b', dedup_key: 'k2' });
     expect(res.statusCode).toBe(202);
   });
+
+  it('20 solicitudes concurrentes con la misma dedup_key crean una sola notificación', async () => {
+    const responses = await Promise.all(Array.from({ length: 20 }, () => post({
+      recipients: ['+51987654321'],
+      message: 'misma alerta',
+      dedup_key: 'concurrente',
+    })));
+    expect(responses.filter((response) => response.statusCode === 202)).toHaveLength(1);
+    expect(responses.filter((response) => response.statusCode === 200)).toHaveLength(19);
+    const { rows } = await ctx.db.query(
+      `SELECT count(*) AS notifications, max(suppressed_count) AS suppressed FROM notifications`,
+    );
+    expect(Number(rows[0].notifications)).toBe(1);
+    expect(rows[0].suppressed).toBe(19);
+    const requests = await ctx.db.query(`SELECT count(*) AS n FROM notification_requests`);
+    expect(Number(requests.rows[0].n)).toBe(20);
+  });
 });
 
 describe('límites', () => {
   it('límite por destinatario suprime solo a ese destinatario', async () => {
+    await setSetting(ctx.db, 'recipient_hourly_warning', 1);
     await setSetting(ctx.db, 'per_recipient_hourly_limit', 1);
     await post({ recipients: ['+51911111111'], message: 'primera' });
     const res = await post({ recipients: ['+51911111111', '+51922222222'], message: 'segunda' });
@@ -146,22 +165,341 @@ describe('límites', () => {
   });
 
   it('límite global suprime todo', async () => {
+    await setSetting(ctx.db, 'global_hourly_warning', 1);
     await setSetting(ctx.db, 'global_hourly_limit', 1);
+    await setSetting(ctx.db, 'critical_hourly_reserve', 0);
     await post({ recipients: ['+51911111111'], message: 'primera' });
     const res = await post({ recipients: ['+51922222222'], message: 'segunda' });
+    expect(res.statusCode).toBe(429);
     expect(res.json().status).toBe('suppressed');
     expect(res.json().deliveries_suppressed).toBe(1);
   });
 
   it('límite de la API key', async () => {
-    await ctx.db.query(`UPDATE api_keys SET rate_limit_per_hour = 1 WHERE name = 'test-app'`);
+    await ctx.db.query(
+      `UPDATE api_keys SET warning_limit_per_hour = 1, rate_limit_per_hour = 1 WHERE name = 'test-app'`,
+    );
     await post({ recipients: ['+51911111111'], message: 'primera' });
     const res = await post({ recipients: ['+51922222222'], message: 'segunda' });
+    expect(res.statusCode).toBe(429);
     const { rows } = await ctx.db.query(
       `SELECT last_error FROM deliveries WHERE notification_id = $1`,
       [res.json().notification_id],
     );
     expect(rows[0].last_error).toBe('rate_limit:api_key');
+  });
+
+  it('límite global 1 con 20 solicitudes concurrentes acepta una sola delivery', async () => {
+    await setSetting(ctx.db, 'global_hourly_warning', 1);
+    await setSetting(ctx.db, 'global_hourly_limit', 1);
+    await setSetting(ctx.db, 'critical_hourly_reserve', 0);
+    await Promise.all(Array.from({ length: 20 }, (_, i) => post({
+      recipients: ['+51987654321'],
+      message: `alerta ${i}`,
+    })));
+    const { rows } = await ctx.db.query(
+      `SELECT count(*) FILTER (WHERE status = 'queued') AS queued,
+              count(*) FILTER (WHERE status = 'suppressed') AS suppressed
+       FROM deliveries`,
+    );
+    expect(Number(rows[0].queued)).toBe(1);
+    expect(Number(rows[0].suppressed)).toBe(19);
+  });
+
+  it('límites por API key y destinatario permanecen estrictos bajo concurrencia', async () => {
+    await ctx.db.query(
+      `UPDATE api_keys SET warning_limit_per_hour = 1, rate_limit_per_hour = 1 WHERE name = 'test-app'`,
+    );
+    await setSetting(ctx.db, 'recipient_hourly_warning', 1);
+    await setSetting(ctx.db, 'per_recipient_hourly_limit', 1);
+    await Promise.all(Array.from({ length: 20 }, (_, i) => post({
+      recipients: ['+51987654321'],
+      message: `petición ${i}`,
+    })));
+    const { rows } = await ctx.db.query(
+      `SELECT count(*) FILTER (WHERE status = 'queued') AS queued FROM deliveries`,
+    );
+    expect(Number(rows[0].queued)).toBe(1);
+    const requests = await ctx.db.query(`SELECT count(*) AS n FROM notification_requests`);
+    expect(Number(requests.rows[0].n)).toBe(20);
+  });
+
+  it('una petición multipartes consume solo el saldo disponible', async () => {
+    await setSetting(ctx.db, 'global_hourly_warning', 1);
+    await setSetting(ctx.db, 'global_hourly_limit', 1);
+    await setSetting(ctx.db, 'critical_hourly_reserve', 0);
+    const res = await post({ recipients: ['+51987654321'], message: 'a'.repeat(161) });
+    expect(res.statusCode).toBe(202);
+    expect(res.json().deliveries_queued).toBe(1);
+    expect(res.json().deliveries_suppressed).toBe(1);
+  });
+
+  it('critical omite cortes de API key y destinatario, pero conserva el corte global absoluto', async () => {
+    await ctx.db.query(
+      `UPDATE api_keys SET warning_limit_per_hour = 1, rate_limit_per_hour = 1 WHERE name = 'test-app'`,
+    );
+    await setSetting(ctx.db, 'recipient_hourly_warning', 1);
+    await setSetting(ctx.db, 'per_recipient_hourly_limit', 1);
+    await post({ recipients: ['+51987654321'], message: 'normal' });
+    const critical = await post({
+      recipients: ['+51987654321'],
+      message: 'crítica',
+      priority: 'critical',
+    });
+    expect(critical.json().deliveries_queued).toBe(1);
+  });
+
+  it('reserva capacidad global para la alerta interna sin superar el corte absoluto', async () => {
+    await setSetting(ctx.db, 'global_hourly_warning', 1);
+    await setSetting(ctx.db, 'global_hourly_limit', 3);
+    await setSetting(ctx.db, 'critical_hourly_reserve', 1);
+    const request = {
+      source: 'reserva-test',
+      keyWarningRateLimit: 100,
+      keyRateLimit: 200,
+      recipients: ['+51987654321'],
+      message: 'normal',
+      channel: 'sms',
+      priority: 'normal',
+      systemAlertRecipients: ['+51900000001'],
+    };
+    await enqueueNotification(ctx.db, request);
+    await enqueueNotification(ctx.db, { ...request, message: 'normal 2' });
+    const limited = await enqueueNotification(ctx.db, { ...request, message: 'normal 3' });
+    expect(limited.kind).toBe('created');
+    if (limited.kind === 'created') {
+      expect(limited.queued).toBe(0);
+      expect(limited.suppressed).toBe(1);
+    }
+
+    const { rows } = await ctx.db.query(
+      `SELECT count(*) FILTER (WHERE status <> 'suppressed') AS physical,
+              count(*) FILTER (WHERE status = 'suppressed') AS suppressed
+       FROM deliveries`,
+    );
+    expect(Number(rows[0].physical)).toBe(3);
+    expect(Number(rows[0].suppressed)).toBe(1);
+    const event = await ctx.db.query(
+      `SELECT alert_deliveries FROM rate_limit_events WHERE scope = 'global' AND level = 'hard'`,
+    );
+    expect(event.rows).toEqual([{ alert_deliveries: 1 }]);
+
+    const absolute = await enqueueNotification(ctx.db, {
+      ...request,
+      message: 'crítica sin saldo',
+      priority: 'critical',
+    });
+    expect(absolute.kind).toBe('created');
+    if (absolute.kind === 'created') expect(absolute.queued).toBe(0);
+  });
+
+  it('audita el aviso y genera una sola alerta administrativa por corte y ventana', async () => {
+    await ctx.db.query(
+      `UPDATE api_keys SET warning_limit_per_hour = 1, rate_limit_per_hour = 1 WHERE name = 'test-app'`,
+    );
+    const request = {
+      source: 'test-app',
+      keyWarningRateLimit: 1,
+      keyRateLimit: 1,
+      recipients: ['+51987654321'],
+      message: 'directa',
+      channel: 'sms',
+      priority: 'normal',
+      systemAlertRecipients: ['+51900000001'],
+    };
+    await enqueueNotification(ctx.db, request);
+    await enqueueNotification(ctx.db, { ...request, message: 'exceso 1' });
+    await enqueueNotification(ctx.db, { ...request, message: 'exceso 2' });
+
+    const events = await ctx.db.query(
+      `SELECT level, alert_deliveries FROM rate_limit_events
+       WHERE scope = 'api_key' ORDER BY level`,
+    );
+    expect(events.rows).toEqual([
+      { level: 'hard', alert_deliveries: 1 },
+      { level: 'warning', alert_deliveries: 0 },
+    ]);
+    const alerts = await ctx.db.query(
+      `SELECT count(*) AS n FROM notifications WHERE source = 'notification-gateway'`,
+    );
+    expect(Number(alerts.rows[0].n)).toBe(1);
+  });
+
+  it('revierte petición, notificación y deliveries si falla un INSERT', async () => {
+    await ctx.db.query(`
+      CREATE FUNCTION test_fail_delivery() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'fallo de prueba'; END $$;
+      CREATE TRIGGER test_fail_delivery BEFORE INSERT ON deliveries
+      FOR EACH ROW EXECUTE FUNCTION test_fail_delivery();
+    `);
+    try {
+      const res = await post({ recipients: ['+51987654321'], message: 'rollback' });
+      expect(res.statusCode).toBe(500);
+      const { rows } = await ctx.db.query(
+        `SELECT
+           (SELECT count(*) FROM notification_requests) AS requests,
+           (SELECT count(*) FROM notifications) AS notifications,
+           (SELECT count(*) FROM deliveries) AS deliveries`,
+      );
+      expect(rows[0]).toEqual({ requests: '0', notifications: '0', deliveries: '0' });
+    } finally {
+      await ctx.db.query('DROP TRIGGER test_fail_delivery ON deliveries');
+      await ctx.db.query('DROP FUNCTION test_fail_delivery()');
+    }
+  });
+});
+
+describe('guarda de cola', () => {
+  beforeEach(async () => {
+    await setSetting(ctx.db, 'queue_warning_depth', 1);
+    await setSetting(ctx.db, 'queue_normal_limit', 1);
+    await setSetting(ctx.db, 'queue_critical_reserve', 1);
+  });
+
+  it('reserva la última posición para critical y responde 429 a normales', async () => {
+    expect((await post({ recipients: ['+51987654321'], message: 'normal 1' })).statusCode).toBe(202);
+    const blocked = await post({ recipients: ['+51987654321'], message: 'normal 2' });
+    expect(blocked.statusCode).toBe(429);
+    expect(blocked.json()).toMatchObject({ status: 'suppressed', retryable: false });
+    expect(blocked.json().reasons).toContain('queue_limit:reserved');
+
+    const critical = await post({
+      recipients: ['+51987654321'], message: 'critical', priority: 'critical',
+    });
+    expect(critical.statusCode).toBe(202);
+    expect(critical.json().deliveries_queued).toBe(1);
+  });
+
+  it('responde 503 con Retry-After cuando también se llena la reserva critical', async () => {
+    await post({ recipients: ['+51987654321'], message: 'normal' });
+    await post({ recipients: ['+51987654321'], message: 'critical 1', priority: 'critical' });
+    const full = await post({ recipients: ['+51987654321'], message: 'critical 2', priority: 'critical' });
+    expect(full.statusCode).toBe(503);
+    expect(full.headers['retry-after']).toBe('60');
+    expect(full.json().reasons).toContain('queue_limit:absolute');
+  });
+
+  it('un reintento rechazado vuelve a evaluar capacidad y conserva 503 mientras siga llena', async () => {
+    await post({ recipients: ['+51987654321'], message: 'normal' });
+    await post({ recipients: ['+51987654321'], message: 'critical 1', priority: 'critical' });
+    const body = {
+      recipients: ['+51987654321'],
+      message: 'critical sin espacio',
+      priority: 'critical',
+      dedup_key: 'queue-full-critical',
+    };
+    expect((await post(body)).statusCode).toBe(503);
+    const duplicate = await post(body);
+    expect(duplicate.statusCode).toBe(503);
+    const { rows } = await ctx.db.query(
+      `SELECT count(*) AS n FROM notifications WHERE dedup_key = 'queue-full-critical'`,
+    );
+    expect(Number(rows[0].n)).toBe(2);
+  });
+
+  it('un reintento critical entra cuando se libera capacidad', async () => {
+    await post({ recipients: ['+51987654321'], message: 'normal' });
+    const occupied = await post({
+      recipients: ['+51987654321'], message: 'critical 1', priority: 'critical',
+    });
+    const body = {
+      recipients: ['+51987654321'],
+      message: 'critical reintentable',
+      priority: 'critical',
+      dedup_key: 'queue-retry-critical',
+    };
+    expect((await post(body)).statusCode).toBe(503);
+    await ctx.db.query(
+      `UPDATE deliveries SET status = 'sent', sent_at = now(), finished_at = now()
+       WHERE notification_id = $1`,
+      [occupied.json().notification_id],
+    );
+    const retried = await post(body);
+    expect(retried.statusCode).toBe(202);
+    expect(retried.json().deliveries_queued).toBe(1);
+  });
+
+  it('el corte por antigüedad bloquea normales, pero no critical', async () => {
+    await setSetting(ctx.db, 'queue_normal_limit', 60);
+    await setSetting(ctx.db, 'queue_hard_oldest_s', 900);
+    const initial = await post({ recipients: ['+51987654321'], message: 'vieja' });
+    await ctx.db.query(
+      `UPDATE deliveries SET created_at = now() - interval '16 minutes'
+       WHERE notification_id = $1`,
+      [initial.json().notification_id],
+    );
+    const normal = await post({ recipients: ['+51987654321'], message: 'normal nueva' });
+    expect(normal.statusCode).toBe(429);
+    expect(normal.json().reasons).toContain('queue_limit:age');
+    const critical = await post({
+      recipients: ['+51987654321'], message: 'critical nueva', priority: 'critical',
+    });
+    expect(critical.statusCode).toBe(202);
+  });
+
+  it('un retrying futuro no activa por sí solo el corte de antigüedad', async () => {
+    await setSetting(ctx.db, 'queue_normal_limit', 60);
+    const initial = await post({ recipients: ['+51987654321'], message: 'retry futuro' });
+    await ctx.db.query(
+      `UPDATE deliveries SET status = 'retrying', created_at = now() - interval '20 minutes',
+         next_retry_at = now() + interval '10 minutes'
+       WHERE notification_id = $1`,
+      [initial.json().notification_id],
+    );
+    const normal = await post({ recipients: ['+51987654321'], message: 'normal permitida' });
+    expect(normal.statusCode).toBe(202);
+  });
+
+  it('el límite de cola permanece estricto con 20 solicitudes concurrentes', async () => {
+    await setSetting(ctx.db, 'queue_critical_reserve', 0);
+    const responses = await Promise.all(Array.from({ length: 20 }, (_, i) => post({
+      recipients: ['+51987654321'], message: `cola ${i}`,
+    })));
+    expect(responses.filter((response) => response.statusCode === 202)).toHaveLength(1);
+    expect(responses.filter((response) => response.statusCode === 429)).toHaveLength(19);
+    const { rows } = await ctx.db.query(
+      `SELECT count(*) FILTER (WHERE status = 'queued') AS queued FROM deliveries`,
+    );
+    expect(Number(rows[0].queued)).toBe(1);
+  });
+
+  it('la alerta administrativa usa la reserva sin recursión', async () => {
+    const request = {
+      source: 'queue-test',
+      keyWarningRateLimit: 100,
+      keyRateLimit: 200,
+      recipients: ['+51987654321'],
+      message: 'normal',
+      channel: 'sms',
+      priority: 'normal',
+      systemAlertRecipients: ['+51900000001'],
+    };
+    await enqueueNotification(ctx.db, request);
+    await enqueueNotification(ctx.db, { ...request, message: 'exceso' });
+    const { rows } = await ctx.db.query(
+      `SELECT count(*) FILTER (WHERE status <> 'suppressed') AS physical,
+              count(*) FILTER (WHERE status = 'suppressed') AS suppressed
+       FROM deliveries`,
+    );
+    expect(rows[0]).toEqual({ physical: '2', suppressed: '1' });
+    const event = await ctx.db.query(
+      `SELECT alert_deliveries FROM rate_limit_events
+       WHERE scope = 'queue' AND scope_key = 'sms:depth' AND level = 'hard'`,
+    );
+    expect(event.rows).toEqual([{ alert_deliveries: 1 }]);
+  });
+});
+
+describe('longitud máxima', () => {
+  it('rechaza más de nueve partes antes de insertar', async () => {
+    const res = await post({ recipients: ['+51987654321'], message: 'á'.repeat(595) });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain('máximo de 9 SMS');
+    const { rows } = await ctx.db.query(
+      `SELECT (SELECT count(*) FROM notification_requests) AS requests,
+              (SELECT count(*) FROM notifications) AS notifications`,
+    );
+    expect(rows[0]).toEqual({ requests: '0', notifications: '0' });
   });
 });
 
@@ -234,5 +572,30 @@ describe('consulta y health', () => {
     expect(body.checks.db).toBe('ok');
     expect(body.checks.provider_sms.ok).toBe(true);
     expect(body.checks.queue.pending).toBe(1);
+    expect(body.checks.queue).toMatchObject({ state: 'ok', ready: 1, absolute_limit: 80 });
+  });
+
+  it('GET /health se degrada cuando la cola queda solo para critical', async () => {
+    await setSetting(ctx.db, 'queue_warning_depth', 1);
+    await setSetting(ctx.db, 'queue_normal_limit', 1);
+    await setSetting(ctx.db, 'queue_critical_reserve', 1);
+    await post({ recipients: ['+51987654321'], message: 'ocupa capacidad normal' });
+    const res = await ctx.app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(false);
+    expect(res.json().checks.queue).toMatchObject({
+      state: 'critical_only', pending: 1, normal_limit: 1, absolute_limit: 2,
+    });
+  });
+
+  it('GET /health conserva el diagnóstico si PostgreSQL no responde', async () => {
+    const query = vi.spyOn(ctx.db, 'query').mockRejectedValue(new Error('db unavailable'));
+    const res = await ctx.app.inject({ method: 'GET', url: '/health' });
+    query.mockRestore();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(false);
+    expect(res.json().checks.db).toContain('db unavailable');
+    expect(res.json().checks.queue).toMatchObject({ state: 'unknown' });
   });
 });

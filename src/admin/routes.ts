@@ -1,6 +1,7 @@
 import type { EventEmitter } from 'node:events';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from '../db.js';
+import { getQueueMetrics, getQueueState } from '../queue-guard.js';
 import { invalidateSettingsCache, getSettings, SETTINGS_DEFAULTS } from '../settings.js';
 import { enqueueNotification, EnqueueError } from '../enqueue.js';
 import { generateToken, hashToken } from '../auth.js';
@@ -19,6 +20,7 @@ const COOKIE = 'ngw_session';
 export interface AdminOptions {
   sessionSecret: string;
   events: EventEmitter;
+  systemAlertRecipients: string[];
 }
 
 export function registerAdminRoutes(
@@ -112,7 +114,19 @@ export function registerAdminRoutes(
        FROM notifications n LEFT JOIN deliveries d ON d.notification_id = n.id
        GROUP BY n.id ORDER BY n.created_at DESC LIMIT 20`,
     );
-    return { last24h: byStatus, providers: health, recent };
+    const settings = await getSettings(db);
+    const queue = await getQueueMetrics(db);
+    return {
+      last24h: byStatus,
+      providers: health,
+      recent,
+      queue: {
+        ...queue,
+        state: getQueueState(queue, settings),
+        normalLimit: settings.queue_normal_limit,
+        absoluteLimit: settings.queue_normal_limit + settings.queue_critical_reserve,
+      },
+    };
   });
 
   // --- notificaciones ---
@@ -219,13 +233,26 @@ export function registerAdminRoutes(
       try {
         const result = await enqueueNotification(db, {
           source: 'panel-test',
+          keyWarningRateLimit: 1000,
           keyRateLimit: 1000,
           recipients: [req.body.recipient],
           message: req.body.message,
           channel: 'sms',
           priority: 'normal',
+          systemAlertRecipients: opts.systemAlertRecipients,
         });
+        for (const rateLimit of result.rateLimitEvents) {
+          req.log.warn({ rateLimit }, 'umbral de rate limit alcanzado');
+        }
         opts.events.emit('change');
+        if (result.kind === 'created' && result.queued === 0 && result.suppressed > 0) {
+          return reply.code(429).send({
+            ...result,
+            status: 'suppressed',
+            reasons: result.suppressionReasons,
+            retryable: false,
+          });
+        }
         return reply.code(202).send(result);
       } catch (err) {
         if (err instanceof EnqueueError) return reply.code(err.statusCode).send({ error: err.message });
@@ -238,13 +265,14 @@ export function registerAdminRoutes(
 
   app.get('/admin/api/keys', { onRequest: requireSession }, async () => {
     const { rows } = await db.query(
-      `SELECT id, name, channels_allowed, rate_limit_per_hour, enabled, created_at, last_used_at
+      `SELECT id, name, channels_allowed, warning_limit_per_hour, rate_limit_per_hour,
+              enabled, created_at, last_used_at
        FROM api_keys ORDER BY created_at DESC`,
     );
     return { keys: rows };
   });
 
-  app.post<{ Body: { name: string; rate_limit_per_hour?: number } }>(
+  app.post<{ Body: { name: string; warning_limit_per_hour?: number; rate_limit_per_hour?: number } }>(
     '/admin/api/keys',
     {
       onRequest: requireSession,
@@ -255,6 +283,7 @@ export function registerAdminRoutes(
           additionalProperties: false,
           properties: {
             name: { type: 'string', minLength: 1, maxLength: 60, pattern: '^[a-zA-Z0-9._-]+$' },
+            warning_limit_per_hour: { type: 'integer', minimum: 1, maximum: 1000 },
             rate_limit_per_hour: { type: 'integer', minimum: 1, maximum: 1000 },
           },
         },
@@ -262,10 +291,16 @@ export function registerAdminRoutes(
     },
     async (req, reply) => {
       const token = generateToken();
+      const hardLimit = req.body.rate_limit_per_hour ?? 120;
+      const warningLimit = req.body.warning_limit_per_hour ?? Math.min(60, hardLimit);
+      if (warningLimit > hardLimit) {
+        return reply.code(400).send({ error: 'El umbral de aviso no puede superar el corte' });
+      }
       try {
         const { rows } = await db.query<{ id: number }>(
-          `INSERT INTO api_keys (name, key_hash, rate_limit_per_hour) VALUES ($1, $2, $3) RETURNING id`,
-          [req.body.name, hashToken(token), req.body.rate_limit_per_hour ?? 20],
+          `INSERT INTO api_keys (name, key_hash, warning_limit_per_hour, rate_limit_per_hour)
+           VALUES ($1, $2, $3, $4) RETURNING id`,
+          [req.body.name, hashToken(token), warningLimit, hardLimit],
         );
         return reply.code(201).send({ id: rows[0]!.id, name: req.body.name, token });
       } catch (err) {
@@ -277,26 +312,48 @@ export function registerAdminRoutes(
     },
   );
 
-  app.patch<{ Params: { id: string }; Body: { enabled: boolean } }>(
+  app.patch<{
+    Params: { id: string };
+    Body: { enabled?: boolean; warning_limit_per_hour?: number; rate_limit_per_hour?: number };
+  }>(
     '/admin/api/keys/:id',
     {
       onRequest: requireSession,
       schema: {
         body: {
           type: 'object',
-          required: ['enabled'],
+          minProperties: 1,
           additionalProperties: false,
-          properties: { enabled: { type: 'boolean' } },
+          properties: {
+            enabled: { type: 'boolean' },
+            warning_limit_per_hour: { type: 'integer', minimum: 1, maximum: 1000000 },
+            rate_limit_per_hour: { type: 'integer', minimum: 1, maximum: 1000000 },
+          },
         },
       },
     },
     async (req, reply) => {
-      const { rows } = await db.query('UPDATE api_keys SET enabled = $2 WHERE id = $1 RETURNING id', [
-        req.params.id,
-        req.body.enabled,
-      ]);
-      if (!rows[0]) return reply.code(404).send({ error: 'Key no encontrada' });
-      return { ok: true };
+      const { rows: currentRows } = await db.query<{
+        warning_limit_per_hour: number;
+        rate_limit_per_hour: number;
+      }>(
+        `SELECT warning_limit_per_hour, rate_limit_per_hour FROM api_keys WHERE id = $1`,
+        [req.params.id],
+      );
+      const current = currentRows[0];
+      if (!current) return reply.code(404).send({ error: 'Key no encontrada' });
+      const warningLimit = req.body.warning_limit_per_hour ?? current.warning_limit_per_hour;
+      const hardLimit = req.body.rate_limit_per_hour ?? current.rate_limit_per_hour;
+      if (warningLimit > hardLimit) {
+        return reply.code(400).send({ error: 'El aviso de la API key no puede superar el corte' });
+      }
+      await db.query(
+        `UPDATE api_keys
+         SET enabled = COALESCE($2, enabled), warning_limit_per_hour = $3, rate_limit_per_hour = $4
+         WHERE id = $1`,
+        [req.params.id, req.body.enabled ?? null, warningLimit, hardLimit],
+      );
+      return { ok: true, warning_limit_per_hour: warningLimit, rate_limit_per_hour: hardLimit };
     },
   );
 
@@ -316,18 +373,41 @@ export function registerAdminRoutes(
         'max_attempts',
         'retry_backoff_s',
         'dedup_window_s',
+        'global_hourly_warning',
         'global_hourly_limit',
+        'recipient_hourly_warning',
         'per_recipient_hourly_limit',
+        'critical_hourly_reserve',
+        'queue_warning_depth',
+        'queue_normal_limit',
+        'queue_critical_reserve',
+        'queue_warning_oldest_s',
+        'queue_hard_oldest_s',
         'inbound_poll_ms',
       ]);
       const entries = Object.entries(req.body).filter(([k]) => editable.has(k));
       if (!entries.length) return reply.code(400).send({ error: 'Nada editable en el cuerpo' });
-      for (const [key, value] of entries) {
-        await db.query(
-          `INSERT INTO settings (key, value) VALUES ($1, $2)
-           ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
-          [key, JSON.stringify(value)],
-        );
+      const current = await getSettings(db);
+      const candidate = { ...current, ...Object.fromEntries(entries) };
+      const validationError = validateLimitSettings(candidate);
+      if (validationError) return reply.code(400).send({ error: validationError });
+
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        for (const [key, value] of entries) {
+          await client.query(
+            `INSERT INTO settings (key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
+            [key, JSON.stringify(value)],
+          );
+        }
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
       }
       invalidateSettingsCache();
       return getSettings(db);
@@ -388,6 +468,46 @@ export function registerAdminRoutes(
       clearInterval(heartbeat);
     });
   });
+}
+
+function validateLimitSettings(settings: Record<string, unknown>): string | null {
+  const names = [
+    'global_hourly_warning',
+    'global_hourly_limit',
+    'recipient_hourly_warning',
+    'per_recipient_hourly_limit',
+    'critical_hourly_reserve',
+    'queue_warning_depth',
+    'queue_normal_limit',
+    'queue_critical_reserve',
+    'queue_warning_oldest_s',
+    'queue_hard_oldest_s',
+  ] as const;
+  for (const name of names) {
+    const value = settings[name];
+    const minimum = name === 'critical_hourly_reserve' || name === 'queue_critical_reserve' ? 0 : 1;
+    if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) > 1_000_000) {
+      return `${name} debe ser un entero entre ${minimum} y 1000000`;
+    }
+  }
+
+  const globalWarning = Number(settings.global_hourly_warning);
+  const globalLimit = Number(settings.global_hourly_limit);
+  const reserve = Number(settings.critical_hourly_reserve);
+  if (reserve >= globalLimit) return 'La reserva crítica debe ser menor que el corte global';
+  if (globalWarning > globalLimit - reserve) {
+    return 'El aviso global no puede superar la capacidad normal (corte global menos reserva crítica)';
+  }
+  if (Number(settings.recipient_hourly_warning) > Number(settings.per_recipient_hourly_limit)) {
+    return 'El aviso por destinatario no puede superar su corte';
+  }
+  if (Number(settings.queue_warning_depth) > Number(settings.queue_normal_limit)) {
+    return 'El aviso de profundidad no puede superar el límite normal de cola';
+  }
+  if (Number(settings.queue_warning_oldest_s) > Number(settings.queue_hard_oldest_s)) {
+    return 'El aviso de antigüedad no puede superar su corte';
+  }
+  return null;
 }
 
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

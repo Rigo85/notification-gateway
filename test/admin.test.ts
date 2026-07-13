@@ -3,6 +3,7 @@ import { hashPassword } from '../src/admin/session.js';
 import {
   authHeaders,
   resetData,
+  setSetting,
   setupContext,
   teardownContext,
   type TestContext,
@@ -81,6 +82,7 @@ describe('overview y listado', () => {
     expect(body.last24h.queued).toBe(1);
     expect(body.recent[0].message).toBe('para overview');
     expect(body.providers.sms.ok).toBe(true);
+    expect(body.queue).toMatchObject({ pendingTotal: 1, ready: 1, state: 'ok', absoluteLimit: 80 });
   });
 
   it('listado filtra por estado', async () => {
@@ -149,11 +151,13 @@ describe('API keys y settings', () => {
       method: 'POST',
       url: '/admin/api/keys',
       headers: withSession(),
-      payload: { name: 'nuevo-servicio', rate_limit_per_hour: 5 },
+      payload: { name: 'nuevo-servicio', warning_limit_per_hour: 3, rate_limit_per_hour: 5 },
     });
     expect(created.statusCode).toBe(201);
     const token = created.json().token;
     expect(token).toMatch(/^ngw_/);
+    const keys = await ctx.app.inject({ method: 'GET', url: '/admin/api/keys', headers: withSession() });
+    expect(keys.json().keys[0]).toMatchObject({ warning_limit_per_hour: 3, rate_limit_per_hour: 5 });
 
     const use = await ctx.app.inject({
       method: 'POST',
@@ -187,6 +191,39 @@ describe('API keys y settings', () => {
     expect(use.statusCode).toBe(401);
   });
 
+  it('actualiza aviso y corte de una API key existente', async () => {
+    const { rows } = await ctx.db.query(`SELECT id FROM api_keys WHERE name = 'test-app'`);
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/admin/api/keys/${rows[0].id}`,
+      headers: withSession(),
+      payload: { warning_limit_per_hour: 200, rate_limit_per_hour: 400 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ warning_limit_per_hour: 200, rate_limit_per_hour: 400 });
+  });
+
+  it('rechaza límites incoherentes de una API key sin modificarla', async () => {
+    const { rows } = await ctx.db.query(
+      `SELECT id, warning_limit_per_hour, rate_limit_per_hour FROM api_keys WHERE name = 'test-app'`,
+    );
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/admin/api/keys/${rows[0].id}`,
+      headers: withSession(),
+      payload: { warning_limit_per_hour: 500, rate_limit_per_hour: 100 },
+    });
+    expect(res.statusCode).toBe(400);
+    const after = await ctx.db.query(
+      `SELECT warning_limit_per_hour, rate_limit_per_hour FROM api_keys WHERE id = $1`,
+      [rows[0].id],
+    );
+    expect(after.rows[0]).toMatchObject({
+      warning_limit_per_hour: rows[0].warning_limit_per_hour,
+      rate_limit_per_hour: rows[0].rate_limit_per_hour,
+    });
+  });
+
   it('PUT settings cambia el comportamiento (dedup_window_s)', async () => {
     const res = await ctx.app.inject({
       method: 'PUT',
@@ -197,6 +234,75 @@ describe('API keys y settings', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().dedup_window_s).toBe(5);
     expect(res.json()).not.toHaveProperty('campo_prohibido');
+  });
+
+  it('actualiza límites relacionados en una sola operación', async () => {
+    const res = await ctx.app.inject({
+      method: 'PUT',
+      url: '/admin/api/settings',
+      headers: withSession(),
+      payload: {
+        global_hourly_warning: 300,
+        global_hourly_limit: 500,
+        critical_hourly_reserve: 20,
+        recipient_hourly_warning: 200,
+        per_recipient_hourly_limit: 400,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      global_hourly_warning: 300,
+      global_hourly_limit: 500,
+      critical_hourly_reserve: 20,
+      recipient_hourly_warning: 200,
+      per_recipient_hourly_limit: 400,
+    });
+  });
+
+  it('rechaza relaciones inválidas y no modifica ningún límite', async () => {
+    const before = await ctx.db.query(
+      `SELECT key, value FROM settings
+       WHERE key IN ('global_hourly_warning', 'global_hourly_limit', 'critical_hourly_reserve')`,
+    );
+    const res = await ctx.app.inject({
+      method: 'PUT',
+      url: '/admin/api/settings',
+      headers: withSession(),
+      payload: { global_hourly_warning: 230, global_hourly_limit: 240, critical_hourly_reserve: 20 },
+    });
+    expect(res.statusCode).toBe(400);
+    const after = await ctx.db.query(
+      `SELECT key, value FROM settings
+       WHERE key IN ('global_hourly_warning', 'global_hourly_limit', 'critical_hourly_reserve')`,
+    );
+    expect(after.rows).toEqual(before.rows);
+  });
+
+  it('valida conjuntamente profundidad, reserva y antigüedad de cola', async () => {
+    const valid = await ctx.app.inject({
+      method: 'PUT',
+      url: '/admin/api/settings',
+      headers: withSession(),
+      payload: {
+        queue_warning_depth: 30,
+        queue_normal_limit: 80,
+        queue_critical_reserve: 20,
+        queue_warning_oldest_s: 600,
+        queue_hard_oldest_s: 1200,
+      },
+    });
+    expect(valid.statusCode).toBe(200);
+    expect(valid.json()).toMatchObject({ queue_normal_limit: 80, queue_critical_reserve: 20 });
+
+    const invalid = await ctx.app.inject({
+      method: 'PUT',
+      url: '/admin/api/settings',
+      headers: withSession(),
+      payload: { queue_warning_depth: 90, queue_normal_limit: 80 },
+    });
+    expect(invalid.statusCode).toBe(400);
+    const settings = await ctx.app.inject({ method: 'GET', url: '/admin/api/settings', headers: withSession() });
+    expect(settings.json()).toMatchObject({ queue_warning_depth: 30, queue_normal_limit: 80 });
   });
 
   it('reset de settings restaura los valores por defecto', async () => {
@@ -214,6 +320,7 @@ describe('API keys y settings', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().dedup_window_s).toBe(900);
     expect(res.json().send_gap_ms).toBe(3000);
+    expect(res.json()).toMatchObject({ queue_normal_limit: 60, queue_critical_reserve: 20 });
   });
 
   it('test-send encola con source panel-test', async () => {
@@ -226,5 +333,21 @@ describe('API keys y settings', () => {
     expect(res.statusCode).toBe(202);
     const { rows } = await ctx.db.query(`SELECT source FROM notifications WHERE message = 'prueba desde panel'`);
     expect(rows[0].source).toBe('panel-test');
+  });
+
+  it('test-send devuelve 429 si la guarda de cola lo suprime', async () => {
+    await setSetting(ctx.db, 'queue_warning_depth', 1);
+    await setSetting(ctx.db, 'queue_normal_limit', 1);
+    await setSetting(ctx.db, 'queue_critical_reserve', 0);
+    await ctx.app.inject({
+      method: 'POST', url: '/admin/api/test-send', headers: withSession(),
+      payload: { recipient: '+51987654321', message: 'ocupa cola' },
+    });
+    const blocked = await ctx.app.inject({
+      method: 'POST', url: '/admin/api/test-send', headers: withSession(),
+      payload: { recipient: '+51987654321', message: 'sin capacidad' },
+    });
+    expect(blocked.statusCode).toBe(429);
+    expect(blocked.json().reasons).toContain('queue_limit:reserved');
   });
 });

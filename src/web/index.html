@@ -86,26 +86,39 @@
       <h2>Nueva API key</h2>
       <form id="key-form" class="inline-form">
         <input name="name" placeholder="nombre-servicio" pattern="[a-zA-Z0-9._-]+" required>
-        <input name="rate_limit_per_hour" type="number" value="20" min="1" max="1000">
+        <input name="warning_limit_per_hour" type="number" value="60" min="1" max="1000" title="Aviso por hora">
+        <input name="rate_limit_per_hour" type="number" value="120" min="1" max="1000" title="Corte por hora">
         <button type="submit">Crear</button>
       </form>
       <p id="key-token" class="token hidden"></p>
     </div>
     <div class="table-scroll"><table id="keys-table"><thead><tr>
-      <th>Nombre</th><th>Límite/h</th><th>Último uso</th><th>Estado</th><th></th>
+      <th>Nombre</th>
+      <th>Aviso/h <button type="button" class="info-button" data-setting-info="api_key_warning" aria-label="Información sobre aviso por API key" title="Más información">i</button></th>
+      <th>Corte/h <button type="button" class="info-button" data-setting-info="api_key_limit" aria-label="Información sobre corte por API key" title="Más información">i</button></th>
+      <th>Último uso</th><th>Estado</th><th></th>
     </tr></thead><tbody></tbody></table></div>
   </section>
 
   <section id="tab-settings" class="tab-content hidden">
     <div class="panel">
-      <h2>Configuración operativa</h2>
+      <h2>Límites y operación</h2>
       <form id="settings-form" class="settings-grid"></form>
+      <div id="limit-capacity" class="limit-capacity" aria-live="polite"></div>
       <button id="settings-save">Guardar</button>
       <button id="settings-reset" class="ghost">Valores por defecto</button>
       <span id="settings-result"></span>
     </div>
   </section>
 </div>
+
+<dialog id="setting-info-dialog" class="info-dialog" aria-labelledby="setting-info-title">
+  <div class="dialog-heading">
+    <h2 id="setting-info-title"></h2>
+    <button type="button" id="setting-info-close" class="icon-button" aria-label="Cerrar">×</button>
+  </div>
+  <div id="setting-info-body" class="dialog-body"></div>
+</dialog>
 <script src="app.js"></script>
 </body>
 </html>

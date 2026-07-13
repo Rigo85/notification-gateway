@@ -32,18 +32,25 @@ export async function setupContext(): Promise<TestContext> {
 
 export async function resetData(db: Db, token: string): Promise<void> {
   await db.query(
-    'TRUNCATE deliveries, notifications, api_keys, users, inbound_messages RESTART IDENTITY CASCADE',
+    `TRUNCATE rate_limit_events, notification_requests, deliveries, notifications,
+              api_keys, users, inbound_messages RESTART IDENTITY CASCADE`,
   );
   await db.query(
     `UPDATE settings SET value = d.v::jsonb FROM (VALUES
       ('send_gap_ms', '3000'), ('poll_ms', '2000'), ('max_attempts', '3'),
       ('retry_backoff_s', '[30, 120, 600]'), ('dedup_window_s', '900'),
-      ('global_hourly_limit', '30'), ('per_recipient_hourly_limit', '10')
+      ('global_hourly_warning', '120'), ('global_hourly_limit', '240'),
+      ('recipient_hourly_warning', '60'), ('per_recipient_hourly_limit', '120'),
+      ('critical_hourly_reserve', '20'),
+      ('queue_warning_depth', '20'), ('queue_normal_limit', '60'),
+      ('queue_critical_reserve', '20'), ('queue_warning_oldest_s', '300'),
+      ('queue_hard_oldest_s', '900')
      ) AS d(k, v) WHERE settings.key = d.k`,
   );
   invalidateSettingsCache();
   await db.query(
-    `INSERT INTO api_keys (name, key_hash, rate_limit_per_hour) VALUES ('test-app', $1, 20)`,
+    `INSERT INTO api_keys (name, key_hash, warning_limit_per_hour, rate_limit_per_hour)
+     VALUES ('test-app', $1, 60, 120)`,
     [hashToken(token)],
   );
 }

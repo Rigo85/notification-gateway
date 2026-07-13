@@ -16,6 +16,12 @@ const api = async (path, opts = {}) => {
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const fmtDate = (d) => d ? new Date(d).toLocaleString('es-PE', { hour12: false }) : '—';
+const fmtDuration = (seconds) => {
+  const value = Math.max(0, Number(seconds) || 0);
+  if (value < 60) return `${value} s`;
+  if (value < 3600) return `${Math.ceil(value / 60)} min`;
+  return `${(value / 3600).toFixed(1)} h`;
+};
 
 // ---------- login ----------
 function showLogin() { $('#login-view').classList.remove('hidden'); $('#main-view').classList.add('hidden'); }
@@ -87,11 +93,16 @@ function summaryBadges(n) {
 async function loadDashboard() {
   const data = await api('/overview');
   const s = data.last24h;
-  const pending = (s.queued ?? 0) + (s.retrying ?? 0) + (s.processing ?? 0);
+  const queue = data.queue;
   const failed = (s.failed ?? 0) + (s.exhausted ?? 0);
+  const queueClass = queue.state === 'full' || queue.state === 'critical_only'
+    ? 'err'
+    : queue.state === 'warning' ? 'warn' : 'ok';
   $('#counters').innerHTML =
     counterCard('Enviados (24 h)', s.sent ?? 0, 'ok') +
-    counterCard('En cola', pending, pending ? 'warn' : '') +
+    counterCard('Cola SMS', `${queue.pendingTotal}/${queue.absoluteLimit}`, queueClass) +
+    counterCard('Más antigua lista', fmtDuration(queue.oldestReadyS), queueClass) +
+    counterCard('Vaciado estimado', fmtDuration(queue.estimatedDrainS), queueClass) +
     counterCard('Fallidos (24 h)', failed, failed ? 'err' : '') +
     counterCard('Suprimidos (24 h)', s.suppressed ?? 0);
   $('#provider-health').innerHTML = Object.entries(data.providers).map(([ch, h]) => {
@@ -215,16 +226,30 @@ async function loadInbound() {
 async function loadKeys() {
   const data = await api('/keys');
   $('#keys-table tbody').innerHTML = data.keys.map((k) => `
-    <tr>
-      <td>${esc(k.name)}</td><td>${k.rate_limit_per_hour}</td>
+    <tr data-id="${k.id}">
+      <td>${esc(k.name)}</td>
+      <td><input class="key-limit-input" data-key-limit="warning" type="number" min="1" max="1000000" value="${k.warning_limit_per_hour}" aria-label="Aviso por hora de ${esc(k.name)}"></td>
+      <td><input class="key-limit-input" data-key-limit="hard" type="number" min="1" max="1000000" value="${k.rate_limit_per_hour}" aria-label="Corte por hora de ${esc(k.name)}"></td>
       <td>${fmtDate(k.last_used_at)}</td>
       <td><span class="badge ${k.enabled ? 'sent' : 'failed'}">${k.enabled ? 'activa' : 'revocada'}</span></td>
-      <td class="actions"><button data-id="${k.id}" data-en="${!k.enabled}" class="ghost">
-        ${k.enabled ? 'Revocar' : 'Reactivar'}</button></td>
+      <td class="actions">
+        <button data-action="save-limits" class="ghost">Guardar</button>
+        <button data-action="toggle" data-en="${!k.enabled}" class="ghost">${k.enabled ? 'Revocar' : 'Reactivar'}</button>
+      </td>
     </tr>`).join('');
   $('#keys-table tbody').querySelectorAll('button').forEach((btn) => btn.addEventListener('click', async () => {
-    await api(`/keys/${btn.dataset.id}`, { method: 'PATCH', body: { enabled: btn.dataset.en === 'true' } });
-    loadKeys();
+    const row = btn.closest('tr');
+    try {
+      if (btn.dataset.action === 'toggle') {
+        await api(`/keys/${row.dataset.id}`, { method: 'PATCH', body: { enabled: btn.dataset.en === 'true' } });
+      } else {
+        await api(`/keys/${row.dataset.id}`, { method: 'PATCH', body: {
+          warning_limit_per_hour: Number(row.querySelector('[data-key-limit="warning"]').value),
+          rate_limit_per_hour: Number(row.querySelector('[data-key-limit="hard"]').value),
+        }});
+      }
+      await loadKeys();
+    } catch (err) { alert(err.message); }
   }));
 }
 
@@ -234,7 +259,8 @@ $('#key-form').addEventListener('submit', async (e) => {
   try {
     const r = await api('/keys', { method: 'POST', body: {
       name: form.get('name'),
-      rate_limit_per_hour: Number(form.get('rate_limit_per_hour')) || 20,
+      warning_limit_per_hour: Number(form.get('warning_limit_per_hour')) || 60,
+      rate_limit_per_hour: Number(form.get('rate_limit_per_hour')) || 120,
     }});
     const tok = $('#key-token');
     tok.classList.remove('hidden');
@@ -245,22 +271,178 @@ $('#key-form').addEventListener('submit', async (e) => {
 });
 
 // ---------- settings ----------
-const SETTING_LABELS = {
-  send_gap_ms: 'Pausa entre SMS (ms)',
-  poll_ms: 'Intervalo de poll (ms)',
-  max_attempts: 'Intentos máximos',
-  retry_backoff_s: 'Backoff de reintentos (s, JSON)',
-  dedup_window_s: 'Ventana de dedup (s)',
-  global_hourly_limit: 'Límite global por hora',
-  per_recipient_hourly_limit: 'Límite por destinatario/hora',
-  inbound_poll_ms: 'Poll de entrantes (ms)',
+const SETTING_META = {
+  global_hourly_warning: {
+    section: 'Límites de envío', label: 'Aviso global', summary: 'Registra que el volumen normal se acerca al corte.',
+    detail: [
+      'Cantidad de deliveries físicas acumuladas en la última hora a partir de la cual se genera un evento de aviso y un log estructurado.',
+      'No bloquea ni suprime SMS. Debe ser menor o igual que la capacidad normal: corte global menos reserva crítica.',
+      'Una petición con varios destinatarios o varias partes consume una delivery por cada destinatario y parte.',
+    ], min: 1,
+  },
+  global_hourly_limit: {
+    section: 'Límites de envío', label: 'Corte global absoluto', summary: 'Máximo total de deliveries físicas por hora.',
+    detail: [
+      'Es el techo absoluto para todos los SMS: normales, critical y alertas internas del gateway.',
+      'Los mensajes normales dejan de aceptarse antes, al llegar a corte global menos reserva crítica. Los critical pueden usar la reserva restante.',
+      'Al alcanzar este valor tampoco se aceptan mensajes critical. Aumentarlo amplía la capacidad total del equipo.',
+    ], min: 1,
+  },
+  critical_hourly_reserve: {
+    section: 'Límites de envío', label: 'Reserva crítica', summary: 'Parte del límite global reservada para critical y alertas internas.',
+    detail: [
+      'Estas deliveries se mantienen libres para que una tormenta de mensajes normales no impida notificar una caída crítica.',
+      'Capacidad normal = corte global absoluto menos reserva crítica. Aumentar solo la reserva reduce la capacidad normal; no aumenta el máximo total.',
+      'Para ampliar normales y critical al mismo tiempo, aumenta también el corte global absoluto.',
+    ], min: 0,
+  },
+  recipient_hourly_warning: {
+    section: 'Límites de envío', label: 'Aviso por destinatario', summary: 'Avisa cuando un número se acerca a su corte individual.',
+    detail: [
+      'Cuenta deliveries físicas dirigidas al mismo número durante la última hora y genera auditoría/log al alcanzar el valor.',
+      'No suprime SMS. Debe ser menor o igual que el corte por destinatario.',
+    ], min: 1,
+  },
+  per_recipient_hourly_limit: {
+    section: 'Límites de envío', label: 'Corte por destinatario', summary: 'Máximo normal destinado al mismo número por hora.',
+    detail: [
+      'Suprime el exceso de mensajes no críticos dirigido a un número concreto, aunque todavía exista capacidad global.',
+      'Los mensajes critical se contabilizan, pero pueden superar este corte; siguen sujetos al corte global absoluto.',
+    ], min: 1,
+  },
+  queue_warning_depth: {
+    section: 'Guarda de cola', label: 'Aviso de profundidad', summary: 'Avisa cuando la cola empieza a acumular retraso.',
+    detail: [
+      'Cuenta todas las deliveries queued, retrying y processing. Al alcanzar este valor se registra auditoría y logging, pero todavía se aceptan mensajes.',
+      'Debe ser menor o igual que el límite normal de cola. Con el GOIP actual, 20 deliveries representan aproximadamente 4-5 minutos de trabajo.',
+    ], min: 1,
+  },
+  queue_normal_limit: {
+    section: 'Guarda de cola', label: 'Límite normal de cola', summary: 'A partir de aquí solo se admiten mensajes critical.',
+    detail: [
+      'Cuando la cola alcanza esta profundidad, las nuevas deliveries no críticas se suprimen con HTTP 429.',
+      'Los mensajes critical todavía pueden usar la reserva de cola. Con el valor 60, la espera acumulada estimada es de 12-15 minutos.',
+    ], min: 1,
+  },
+  queue_critical_reserve: {
+    section: 'Guarda de cola', label: 'Reserva critical de cola', summary: 'Espacios adicionales exclusivos para mensajes critical.',
+    detail: [
+      'Límite absoluto de cola = límite normal más reserva critical. Estos espacios permiten que una tormenta normal no bloquee una alerta urgente.',
+      'Cuando también se llena la reserva, el gateway responde HTTP 503 con Retry-After y Atalaya vuelve a intentarlo.',
+    ], min: 0,
+  },
+  queue_warning_oldest_s: {
+    section: 'Guarda de cola', label: 'Aviso por antigüedad', summary: 'Avisa si una delivery lista lleva demasiado tiempo esperando.',
+    detail: [
+      'Se expresa en segundos y mide solo trabajo listo para enviar. Un reintento programado para el futuro no activa por sí solo esta guarda.',
+      'El valor inicial de 300 segundos equivale a 5 minutos.',
+    ], min: 1,
+  },
+  queue_hard_oldest_s: {
+    section: 'Guarda de cola', label: 'Corte por antigüedad', summary: 'Bloquea normales cuando la cola lista está estancada.',
+    detail: [
+      'Al alcanzar esta antigüedad se suprimen nuevas deliveries no críticas aunque la cola sea pequeña. Los mensajes critical conservan acceso a su reserva.',
+      'El valor inicial de 900 segundos equivale a 15 minutos y debe ser mayor o igual que el aviso.',
+    ], min: 1,
+  },
+  send_gap_ms: {
+    section: 'Operación', label: 'Pausa entre SMS', summary: 'Espera mínima entre dos envíos al GOIP, en milisegundos.',
+    detail: ['Protege el módem evitando envíos consecutivos demasiado rápidos. No modifica los límites por hora.'], min: 1,
+  },
+  poll_ms: {
+    section: 'Operación', label: 'Intervalo de cola', summary: 'Frecuencia con que el worker busca SMS pendientes.',
+    detail: ['Un valor menor reduce latencia, pero consulta PostgreSQL con mayor frecuencia. Se expresa en milisegundos.'], min: 1,
+  },
+  max_attempts: {
+    section: 'Operación', label: 'Intentos máximos', summary: 'Cantidad máxima de intentos antes de marcar un envío agotado.',
+    detail: ['Incluye el primer intento y los reintentos que consumen intento. Los errores clasificados como busy tendrán reglas propias en una tanda posterior.'], min: 1,
+  },
+  retry_backoff_s: {
+    section: 'Operación', label: 'Espera entre reintentos', summary: 'Secuencia de esperas en segundos, escrita como arreglo JSON.',
+    detail: ['Ejemplo: [30, 120, 600] reintenta después de 30 segundos, luego 2 minutos y finalmente 10 minutos.'], type: 'text',
+  },
+  dedup_window_s: {
+    section: 'Operación', label: 'Ventana de deduplicación', summary: 'Tiempo durante el que una dedup_key repetida se suprime.',
+    detail: ['La primera notificación se envía inmediatamente. Las repeticiones se cuentan para el panel y no generan nuevas deliveries. Se expresa en segundos.'], min: 1,
+  },
+  inbound_poll_ms: {
+    section: 'Operación', label: 'Consulta de entrantes', summary: 'Frecuencia de lectura del inbox del GOIP.',
+    detail: ['Controla cada cuántos milisegundos se consultan SMS entrantes. No afecta el envío de alertas.'], min: 1,
+  },
+  api_key_warning: {
+    label: 'Aviso por API key', detail: [
+      'Cuenta peticiones HTTP recibidas durante la última hora para una API key concreta.',
+      'Al alcanzarlo genera auditoría y logging, pero todavía acepta peticiones. Cada petición cuenta una vez aunque produzca varias deliveries.',
+    ],
+  },
+  api_key_limit: {
+    label: 'Corte por API key', detail: [
+      'Suprime las deliveries no críticas de las peticiones que superen este número por hora para el servicio.',
+      'Las peticiones critical se contabilizan, pero pueden superar este corte y siguen sujetas al máximo global absoluto.',
+    ],
+  },
 };
 async function loadSettings() {
   const s = await api('/settings');
-  $('#settings-form').innerHTML = Object.entries(SETTING_LABELS).map(([key, label]) => `
-    <label for="set-${key}">${label}</label>
-    <input id="set-${key}" name="${key}" value='${esc(JSON.stringify(s[key]))}'>`).join('');
+  const sections = ['Límites de envío', 'Guarda de cola', 'Operación'];
+  $('#settings-form').innerHTML = sections.map((section) => `
+    <fieldset class="settings-section">
+      <h3>${section}</h3>
+      ${Object.entries(SETTING_META).filter(([, meta]) => meta.section === section).map(([key, meta]) => `
+        <div class="setting-row">
+          <div class="setting-copy">
+            <div class="setting-label">
+              <label for="set-${key}">${meta.label}</label>
+              <button type="button" class="info-button" data-setting-info="${key}" aria-label="Información sobre ${meta.label}" title="Más información">i</button>
+            </div>
+            <p>${meta.summary}</p>
+          </div>
+          <input id="set-${key}" name="${key}" type="${meta.type || 'number'}"
+            ${meta.type === 'text' ? '' : `min="${meta.min}" max="1000000" step="1"`}
+            value='${esc(JSON.stringify(s[key]))}'>
+        </div>`).join('')}
+    </fieldset>`).join('');
+  $('#settings-form').querySelectorAll('input').forEach((input) => input.addEventListener('input', updateLimitCapacity));
+  updateLimitCapacity();
 }
+
+function updateLimitCapacity() {
+  const global = Number($('#set-global_hourly_limit')?.value);
+  const reserve = Number($('#set-critical_hourly_reserve')?.value);
+  const warning = Number($('#set-global_hourly_warning')?.value);
+  const queueWarning = Number($('#set-queue_warning_depth')?.value);
+  const queueNormal = Number($('#set-queue_normal_limit')?.value);
+  const queueReserve = Number($('#set-queue_critical_reserve')?.value);
+  const ageWarning = Number($('#set-queue_warning_oldest_s')?.value);
+  const ageHard = Number($('#set-queue_hard_oldest_s')?.value);
+  if (![global, reserve, warning, queueWarning, queueNormal, queueReserve, ageWarning, ageHard].every(Number.isFinite)) return;
+  const normal = global - reserve;
+  const queueAbsolute = queueNormal + queueReserve;
+  const box = $('#limit-capacity');
+  const valid = reserve >= 0 && reserve < global && warning <= normal &&
+    queueReserve >= 0 && queueWarning <= queueNormal && ageWarning <= ageHard;
+  box.classList.toggle('invalid', !valid);
+  box.innerHTML = valid
+    ? `Por hora: <strong>${normal} normales + ${reserve} critical = ${global}</strong><br>Cola: <strong>${queueNormal} normales + ${queueReserve} critical = ${queueAbsolute}</strong>`
+    : 'Combinación inválida: revisa avisos, cortes y reservas.';
+}
+
+function showSettingInfo(key) {
+  const meta = SETTING_META[key];
+  if (!meta) return;
+  $('#setting-info-title').textContent = meta.label;
+  $('#setting-info-body').innerHTML = meta.detail.map((paragraph) => `<p>${esc(paragraph)}</p>`).join('');
+  $('#setting-info-dialog').showModal();
+}
+
+document.addEventListener('click', (event) => {
+  const button = event.target instanceof Element ? event.target.closest('[data-setting-info]') : null;
+  if (button) showSettingInfo(button.dataset.settingInfo);
+});
+$('#setting-info-close').addEventListener('click', () => $('#setting-info-dialog').close());
+$('#setting-info-dialog').addEventListener('click', (event) => {
+  if (event.target === $('#setting-info-dialog')) $('#setting-info-dialog').close();
+});
 $('#settings-save').addEventListener('click', async () => {
   const body = {};
   const out = $('#settings-result');

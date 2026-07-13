@@ -14,6 +14,7 @@ export interface AppOptions {
   sessionSecret?: string;
   events?: EventEmitter;
   trustProxy?: boolean;
+  systemAlertRecipients?: string[];
 }
 
 export function buildApp(
@@ -34,7 +35,11 @@ export function buildApp(
   app.get('/admin', (_req, reply) => reply.redirect('/admin/'));
   app.get('/', (_req, reply) => reply.redirect('/admin/'));
 
-  registerRoutes(app, db, providers, events);
-  registerAdminRoutes(app, db, providers, { sessionSecret, events });
+  registerRoutes(app, db, providers, events, opts.systemAlertRecipients ?? []);
+  registerAdminRoutes(app, db, providers, {
+    sessionSecret,
+    events,
+    systemAlertRecipients: opts.systemAlertRecipients ?? [],
+  });
   return app;
 }

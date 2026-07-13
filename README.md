@@ -33,7 +33,7 @@ npm run dev         # server con provider fake (no envía SMS reales)
 # Usuarios del panel /admin (crear o cambiar contraseña; mínimo 8 caracteres)
 npm run create-admin -- admin mi-contraseña-segura
 
-npm run create-key -- mi-servicio 20   # genera API key (límite 20/hora)
+npm run create-key -- mi-servicio      # genera API key (aviso 60/h, corte 120/h)
 
 curl -X POST localhost:8090/api/notifications \
   -H "Authorization: Bearer ngw_..." -H "Content-Type: application/json" \
@@ -45,9 +45,16 @@ Endpoints: `POST /api/notifications`, `GET /api/notifications/:id`, `GET /health
 
 Estados de una delivery: `queued → processing → sent` con
 `retrying/exhausted/failed/suppressed/cancelled` según el caso.
-Protecciones: dedup por ventana (15 min), límites por hora (global / por
-destinatario / por API key), división de mensajes largos (≤160 ASCII / ≤70 Unicode),
-reintentos 30 s → 2 min → 10 min. Todo configurable en la tabla `settings`.
+Protecciones: dedup por ventana (15 min), límites atómicos por hora (global /
+destinatario / API key), reserva crítica, alerta administrativa de corte y división
+íntegra de mensajes largos (≤160 ASCII / ≤70 Unicode, máximo 9 partes). Los umbrales
+operativos son configurables en el panel y `SYSTEM_ALERT_RECIPIENTS` define por entorno
+quién recibe las alertas internas.
+
+La admisión también vigila profundidad y antigüedad de la cola. Por defecto, desde 60
+deliveries pendientes solo admite `critical`, reserva 20 posiciones adicionales y bloquea
+normales si la delivery lista más antigua supera 15 minutos. Un rechazo total normal
+responde `429`; un `critical` sin capacidad absoluta responde `503` con `Retry-After`.
 
 ## Panel /admin
 
@@ -72,9 +79,10 @@ npm ci && npm run build
 #    SESSION_SECRET=$(openssl rand -hex 32)
 #    SMS_PROVIDER=goip  +  GOIP_BASE_URL/USER/PASSWORD
 
-# 4. migraciones corren solas al arrancar; crear admin y keys:
+# 4. migraciones corren solas al arrancar; configurar SYSTEM_ALERT_RECIPIENTS
+#    con el mismo destinatario operativo de Atalaya y crear admin/keys:
 npm run create-admin -- admin <contraseña>
-npm run create-key -- <servicio> 20
+npm run create-key -- <servicio>
 
 # 5. arrancar
 pm2 start ecosystem.config.cjs && pm2 save

@@ -6,8 +6,16 @@ export interface Settings {
   max_attempts: number;
   retry_backoff_s: number[];
   dedup_window_s: number;
+  global_hourly_warning: number;
   global_hourly_limit: number;
+  recipient_hourly_warning: number;
   per_recipient_hourly_limit: number;
+  critical_hourly_reserve: number;
+  queue_warning_depth: number;
+  queue_normal_limit: number;
+  queue_critical_reserve: number;
+  queue_warning_oldest_s: number;
+  queue_hard_oldest_s: number;
   inbound_poll_ms: number;
 }
 
@@ -17,8 +25,16 @@ export const SETTINGS_DEFAULTS: Settings = {
   max_attempts: 3,
   retry_backoff_s: [30, 120, 600],
   dedup_window_s: 900,
-  global_hourly_limit: 30,
-  per_recipient_hourly_limit: 10,
+  global_hourly_warning: 120,
+  global_hourly_limit: 240,
+  recipient_hourly_warning: 60,
+  per_recipient_hourly_limit: 120,
+  critical_hourly_reserve: 20,
+  queue_warning_depth: 20,
+  queue_normal_limit: 60,
+  queue_critical_reserve: 20,
+  queue_warning_oldest_s: 300,
+  queue_hard_oldest_s: 900,
   inbound_poll_ms: 10_000,
 };
 
