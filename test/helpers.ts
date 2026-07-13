@@ -36,6 +36,10 @@ export async function resetData(db: Db, token: string): Promise<void> {
               api_keys, users, inbound_messages RESTART IDENTITY CASCADE`,
   );
   await db.query(
+    `UPDATE service_health SET last_success_at = NULL, last_error_at = NULL,
+       last_error = NULL, detail = '{}', updated_at = now()`,
+  );
+  await db.query(
     `UPDATE settings SET value = d.v::jsonb FROM (VALUES
       ('send_gap_ms', '3000'), ('poll_ms', '2000'), ('max_attempts', '3'),
       ('retry_backoff_s', '[30, 120, 600]'), ('dedup_window_s', '900'),
@@ -44,7 +48,9 @@ export async function resetData(db: Db, token: string): Promise<void> {
       ('critical_hourly_reserve', '20'),
       ('queue_warning_depth', '20'), ('queue_normal_limit', '60'),
       ('queue_critical_reserve', '20'), ('queue_warning_oldest_s', '300'),
-      ('queue_hard_oldest_s', '900')
+      ('queue_hard_oldest_s', '900'), ('retry_window_s', '3600'),
+      ('unavailable_retry_s', '30'), ('uncertain_poll_s', '10'),
+      ('inbound_poll_ms', '10000')
      ) AS d(k, v) WHERE settings.key = d.k`,
   );
   invalidateSettingsCache();

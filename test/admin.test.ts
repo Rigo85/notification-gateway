@@ -105,6 +105,25 @@ describe('overview y listado', () => {
     });
     expect(sent.json().notifications).toHaveLength(0);
   });
+
+  it('listado resume uncertain como pendiente y expired como fallido', async () => {
+    const first = await ctx.app.inject({
+      method: 'POST', url: '/api/notifications', headers: authHeaders(ctx),
+      payload: { recipients: ['+51987654321'], message: 'incierta' },
+    });
+    const second = await ctx.app.inject({
+      method: 'POST', url: '/api/notifications', headers: authHeaders(ctx),
+      payload: { recipients: ['+51987654322'], message: 'expirada' },
+    });
+    await ctx.db.query(`UPDATE deliveries SET status = 'uncertain' WHERE notification_id = $1`, [first.json().notification_id]);
+    await ctx.db.query(`UPDATE deliveries SET status = 'expired' WHERE notification_id = $1`, [second.json().notification_id]);
+
+    const res = await ctx.app.inject({ method: 'GET', url: '/admin/api/notifications', headers: withSession() });
+    const uncertain = res.json().notifications.find((item: { message: string }) => item.message === 'incierta');
+    const expired = res.json().notifications.find((item: { message: string }) => item.message === 'expirada');
+    expect(uncertain).toMatchObject({ pending: '1', failed: '0' });
+    expect(expired).toMatchObject({ pending: '0', failed: '1' });
+  });
 });
 
 describe('acciones sobre deliveries', () => {
@@ -305,6 +324,21 @@ describe('API keys y settings', () => {
     expect(settings.json()).toMatchObject({ queue_warning_depth: 30, queue_normal_limit: 80 });
   });
 
+  it('rechaza settings operativos fuera de rango o backoff insuficiente', async () => {
+    for (const payload of [
+      { send_gap_ms: 999 },
+      { poll_ms: 100 },
+      { retry_window_s: 30 },
+      { max_attempts: 4, retry_backoff_s: [10, 20] },
+      { inbound_poll_ms: 999 },
+    ]) {
+      const res = await ctx.app.inject({
+        method: 'PUT', url: '/admin/api/settings', headers: withSession(), payload,
+      });
+      expect(res.statusCode).toBe(400);
+    }
+  });
+
   it('reset de settings restaura los valores por defecto', async () => {
     await ctx.app.inject({
       method: 'PUT',
@@ -349,5 +383,36 @@ describe('API keys y settings', () => {
     });
     expect(blocked.statusCode).toBe(429);
     expect(blocked.json().reasons).toContain('queue_limit:reserved');
+  });
+
+  it('resuelve uncertain manualmente y retry de expired abre una ventana nueva', async () => {
+    const created = await ctx.app.inject({
+      method: 'POST', url: '/admin/api/test-send', headers: withSession(),
+      payload: { recipient: '+51987654321', message: 'incierta' },
+    });
+    expect(created.statusCode).toBe(202);
+    const notificationId = created.json().notificationId;
+    const delivery = await ctx.db.query(
+      `UPDATE deliveries SET status = 'uncertain', first_attempt_at = now() - interval '2 hours',
+         provider_id = 'manual-key' WHERE notification_id = $1 RETURNING id`,
+      [notificationId],
+    );
+    const id = delivery.rows[0].id;
+    const resolved = await ctx.app.inject({
+      method: 'POST', url: `/admin/api/deliveries/${id}/resolve-uncertain`, headers: withSession(),
+      payload: { status: 'failed' },
+    });
+    expect(resolved.statusCode).toBe(200);
+    await ctx.db.query(`UPDATE deliveries SET status = 'expired' WHERE id = $1`, [id]);
+    const retried = await ctx.app.inject({
+      method: 'POST', url: `/admin/api/deliveries/${id}/retry`, headers: withSession(),
+    });
+    expect(retried.statusCode).toBe(200);
+    const { rows } = await ctx.db.query(
+      `SELECT status, attempts, first_attempt_at, send_started_at, provider_id FROM deliveries WHERE id = $1`, [id],
+    );
+    expect(rows[0]).toEqual({
+      status: 'queued', attempts: 0, first_attempt_at: null, send_started_at: null, provider_id: null,
+    });
   });
 });

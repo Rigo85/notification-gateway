@@ -39,7 +39,7 @@ export async function getQueueMetrics(db: Db | PoolClient, channel = 'sms'): Pro
          WHERE status IN ('queued', 'processing') OR next_retry_at <= now()
        ))::int::text AS oldest_ready_s
      FROM deliveries
-     WHERE channel = $1 AND status IN ('queued', 'retrying', 'processing')`,
+     WHERE channel = $1 AND status IN ('queued', 'retrying', 'processing', 'uncertain')`,
     [channel],
   );
   const row = rows[0];

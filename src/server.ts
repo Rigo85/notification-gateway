@@ -30,8 +30,11 @@ async function main(): Promise<void> {
 
   const worker = new Worker(db, providers, app.log, events);
   const inbound = new InboundPoller(db, providers, app.log, events);
+  let shuttingDown = false;
 
   const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     app.log.info({ signal }, 'apagando');
     await Promise.all([worker.stop(), inbound.stop()]);
     await app.close();

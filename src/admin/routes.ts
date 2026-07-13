@@ -2,7 +2,7 @@ import type { EventEmitter } from 'node:events';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from '../db.js';
 import { getQueueMetrics, getQueueState } from '../queue-guard.js';
-import { invalidateSettingsCache, getSettings, SETTINGS_DEFAULTS } from '../settings.js';
+import { invalidateSettingsCache, getSettings, SETTINGS_DEFAULTS, validateSettings } from '../settings.js';
 import { enqueueNotification, EnqueueError } from '../enqueue.js';
 import { generateToken, hashToken } from '../auth.js';
 import {
@@ -109,13 +109,19 @@ export function registerAdminRoutes(
       `SELECT n.id, n.source, n.channel, n.message, n.priority, n.suppressed_count, n.created_at,
               count(d.id) AS deliveries,
               count(d.id) FILTER (WHERE d.status = 'sent') AS sent,
-              count(d.id) FILTER (WHERE d.status IN ('queued','retrying','processing')) AS pending,
-              count(d.id) FILTER (WHERE d.status IN ('failed','exhausted')) AS failed
+              count(d.id) FILTER (WHERE d.status IN ('queued','retrying','processing','uncertain')) AS pending,
+              count(d.id) FILTER (WHERE d.status IN ('failed','exhausted','expired')) AS failed
        FROM notifications n LEFT JOIN deliveries d ON d.notification_id = n.id
        GROUP BY n.id ORDER BY n.created_at DESC LIMIT 20`,
     );
     const settings = await getSettings(db);
     const queue = await getQueueMetrics(db);
+    const { rows: serviceHealth } = await db.query(
+      `SELECT component, last_success_at, last_error_at, last_error, detail, updated_at,
+              extract(epoch FROM now() - last_success_at)::int AS age_s,
+              extract(epoch FROM now() - COALESCE(last_success_at, updated_at))::int AS reference_age_s
+       FROM service_health ORDER BY component`,
+    );
     return {
       last24h: byStatus,
       providers: health,
@@ -126,6 +132,8 @@ export function registerAdminRoutes(
         normalLimit: settings.queue_normal_limit,
         absoluteLimit: settings.queue_normal_limit + settings.queue_critical_reserve,
       },
+      serviceHealth,
+      inboundStaleAfterS: Math.max(60, Math.ceil(settings.inbound_poll_ms * 3 / 1000)),
     };
   });
 
@@ -151,8 +159,8 @@ export function registerAdminRoutes(
       `SELECT n.id, n.source, n.channel, n.message, n.priority, n.dedup_key, n.suppressed_count, n.created_at,
               count(d.id) AS deliveries,
               count(d.id) FILTER (WHERE d.status = 'sent') AS sent,
-              count(d.id) FILTER (WHERE d.status IN ('queued','retrying','processing')) AS pending,
-              count(d.id) FILTER (WHERE d.status IN ('failed','exhausted')) AS failed,
+              count(d.id) FILTER (WHERE d.status IN ('queued','retrying','processing','uncertain')) AS pending,
+              count(d.id) FILTER (WHERE d.status IN ('failed','exhausted','expired')) AS failed,
               count(d.id) FILTER (WHERE d.status = 'suppressed') AS suppressed
        FROM notifications n LEFT JOIN deliveries d ON d.notification_id = n.id
        ${where}
@@ -184,14 +192,43 @@ export function registerAdminRoutes(
     async (req, reply) => {
       const { rows } = await db.query(
         `UPDATE deliveries SET status = 'queued', attempts = 0, next_retry_at = now(),
-           last_error = NULL, finished_at = NULL, locked_at = NULL
-         WHERE id = $1 AND status IN ('failed', 'exhausted', 'cancelled', 'suppressed')
+           last_error = NULL, finished_at = NULL, locked_at = NULL,
+           first_attempt_at = NULL, send_started_at = NULL, submitted_at = NULL, last_reconciled_at = NULL,
+           provider_id = NULL, provider_response = NULL
+         WHERE id = $1 AND status IN ('failed', 'exhausted', 'expired', 'cancelled', 'suppressed')
          RETURNING id`,
         [req.params.id],
       );
-      if (!rows[0]) return reply.code(409).send({ error: 'Solo se reintentan deliveries failed/exhausted/cancelled/suppressed' });
+      if (!rows[0]) return reply.code(409).send({ error: 'Solo se reintentan deliveries failed/exhausted/expired/cancelled/suppressed' });
       opts.events.emit('change');
       return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { status: 'sent' | 'failed' } }>(
+    '/admin/api/deliveries/:id/resolve-uncertain',
+    {
+      onRequest: requireSession,
+      schema: {
+        body: {
+          type: 'object', required: ['status'], additionalProperties: false,
+          properties: { status: { type: 'string', enum: ['sent', 'failed'] } },
+        },
+      },
+    },
+    async (req, reply) => {
+      const { rows } = await db.query(
+        `UPDATE deliveries SET status = $2, locked_at = NULL, finished_at = now(),
+           sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END,
+           last_reconciled_at = now(),
+           last_error = CASE WHEN $2 = 'failed'
+             THEN 'resultado incierto resuelto manualmente como fallido' ELSE NULL END
+         WHERE id = $1 AND status = 'uncertain' RETURNING id`,
+        [req.params.id, req.body.status],
+      );
+      if (!rows[0]) return reply.code(409).send({ error: 'Solo se resuelven deliveries uncertain' });
+      opts.events.emit('change');
+      return { ok: true, status: req.body.status };
     },
   );
 
@@ -383,13 +420,16 @@ export function registerAdminRoutes(
         'queue_critical_reserve',
         'queue_warning_oldest_s',
         'queue_hard_oldest_s',
+        'retry_window_s',
+        'unavailable_retry_s',
+        'uncertain_poll_s',
         'inbound_poll_ms',
       ]);
       const entries = Object.entries(req.body).filter(([k]) => editable.has(k));
       if (!entries.length) return reply.code(400).send({ error: 'Nada editable en el cuerpo' });
       const current = await getSettings(db);
       const candidate = { ...current, ...Object.fromEntries(entries) };
-      const validationError = validateLimitSettings(candidate);
+      const validationError = validateSettings(candidate);
       if (validationError) return reply.code(400).send({ error: validationError });
 
       const client = await db.connect();
@@ -428,9 +468,9 @@ export function registerAdminRoutes(
         where = `WHERE sender ILIKE $1`;
       }
       const { rows } = await db.query(
-        `SELECT id, channel, sender, body, device_time, received_at, parsed_as_command
+        `SELECT id, channel, sender, body, device_time, device_received_at, received_at, parsed_as_command
          FROM inbound_messages ${where}
-         ORDER BY date_trunc('second', received_at) DESC, device_time DESC LIMIT ${limit}`,
+         ORDER BY COALESCE(device_received_at, received_at) DESC, received_at DESC LIMIT ${limit}`,
         params,
       );
       return { messages: rows };
@@ -468,46 +508,6 @@ export function registerAdminRoutes(
       clearInterval(heartbeat);
     });
   });
-}
-
-function validateLimitSettings(settings: Record<string, unknown>): string | null {
-  const names = [
-    'global_hourly_warning',
-    'global_hourly_limit',
-    'recipient_hourly_warning',
-    'per_recipient_hourly_limit',
-    'critical_hourly_reserve',
-    'queue_warning_depth',
-    'queue_normal_limit',
-    'queue_critical_reserve',
-    'queue_warning_oldest_s',
-    'queue_hard_oldest_s',
-  ] as const;
-  for (const name of names) {
-    const value = settings[name];
-    const minimum = name === 'critical_hourly_reserve' || name === 'queue_critical_reserve' ? 0 : 1;
-    if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) > 1_000_000) {
-      return `${name} debe ser un entero entre ${minimum} y 1000000`;
-    }
-  }
-
-  const globalWarning = Number(settings.global_hourly_warning);
-  const globalLimit = Number(settings.global_hourly_limit);
-  const reserve = Number(settings.critical_hourly_reserve);
-  if (reserve >= globalLimit) return 'La reserva crítica debe ser menor que el corte global';
-  if (globalWarning > globalLimit - reserve) {
-    return 'El aviso global no puede superar la capacidad normal (corte global menos reserva crítica)';
-  }
-  if (Number(settings.recipient_hourly_warning) > Number(settings.per_recipient_hourly_limit)) {
-    return 'El aviso por destinatario no puede superar su corte';
-  }
-  if (Number(settings.queue_warning_depth) > Number(settings.queue_normal_limit)) {
-    return 'El aviso de profundidad no puede superar el límite normal de cola';
-  }
-  if (Number(settings.queue_warning_oldest_s) > Number(settings.queue_hard_oldest_s)) {
-    return 'El aviso de antigüedad no puede superar su corte';
-  }
-  return null;
 }
 
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

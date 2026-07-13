@@ -505,14 +505,20 @@ describe('longitud máxima', () => {
 
 describe('reintentos y fallos', () => {
   it('fallo retryable → retrying con backoff; agota a exhausted', async () => {
-    ctx.fake.behavior = { onSend: () => ({ ok: false, error: 'provider not reply (2172)', retryable: true }) };
+    ctx.fake.behavior = { onSend: () => ({
+      outcome: 'temporary', countsAsAttempt: true, error: 'provider not reply (2172)',
+    }) };
     const res = await post({ recipients: ['+51987654321'], message: 'x' });
     const id = res.json().notification_id;
 
     await worker.runOnce('sms');
-    let { rows } = await ctx.db.query(`SELECT status, attempts, next_retry_at FROM deliveries WHERE notification_id = $1`, [id]);
+    let { rows } = await ctx.db.query(
+      `SELECT status, attempts, next_retry_at, send_started_at, submitted_at, provider_id
+       FROM deliveries WHERE notification_id = $1`, [id],
+    );
     expect(rows[0].status).toBe('retrying');
     expect(rows[0].attempts).toBe(1);
+    expect(rows[0]).toMatchObject({ send_started_at: null, submitted_at: null, provider_id: null });
     expect(new Date(rows[0].next_retry_at).getTime()).toBeGreaterThan(Date.now() + 25_000);
 
     // adelantar el reloj: forzar reintentos ya
@@ -527,7 +533,9 @@ describe('reintentos y fallos', () => {
   });
 
   it('fallo no-retryable → failed al primer intento', async () => {
-    ctx.fake.behavior = { onSend: () => ({ ok: false, error: 'user or password error', retryable: false }) };
+    ctx.fake.behavior = { onSend: () => ({
+      outcome: 'permanent', countsAsAttempt: true, error: 'user or password error',
+    }) };
     const res = await post({ recipients: ['+51987654321'], message: 'x' });
     await worker.runOnce('sms');
     const { rows } = await ctx.db.query(`SELECT status, attempts FROM deliveries WHERE notification_id = $1`, [
@@ -535,6 +543,112 @@ describe('reintentos y fallos', () => {
     ]);
     expect(rows[0].status).toBe('failed');
     expect(rows[0].attempts).toBe(1);
+  });
+
+  it('busy no consume intento y conserva la ventana inicial', async () => {
+    ctx.fake.behavior = { onSend: () => ({
+      outcome: 'busy', countsAsAttempt: false, retryAfterMs: 1_000, error: 'L1 busy',
+    }) };
+    const res = await post({ recipients: ['+51987654321'], message: 'busy' });
+    await worker.runOnce('sms');
+    const { rows } = await ctx.db.query(
+      `SELECT status, attempts, first_attempt_at, send_started_at FROM deliveries WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    expect(rows[0]).toMatchObject({ status: 'retrying', attempts: 0 });
+    expect(rows[0].first_attempt_at).not.toBeNull();
+    expect(rows[0].send_started_at).toBeNull();
+  });
+
+  it('health GSM caído no invoca send ni consume intento; al volver envía', async () => {
+    let sends = 0;
+    ctx.fake.behavior = {
+      health: { ok: false, detail: { gsm_registered: false, signal: 99 } },
+      onSend: () => {
+        sends++;
+        return { outcome: 'sent', countsAsAttempt: true, providerId: 'recovered' };
+      },
+    };
+    const res = await post({ recipients: ['+51987654321'], message: 'espera GSM' });
+    await worker.runOnce('sms');
+    expect(sends).toBe(0);
+    let { rows } = await ctx.db.query(
+      `SELECT status, attempts, first_attempt_at FROM deliveries WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    expect(rows[0]).toMatchObject({ status: 'retrying', attempts: 0 });
+    expect(rows[0].first_attempt_at).not.toBeNull();
+
+    ctx.fake.behavior.health = { ok: true };
+    await ctx.db.query(`UPDATE deliveries SET next_retry_at = now() WHERE notification_id = $1`, [res.json().notification_id]);
+    await worker.runOnce('sms');
+    ({ rows } = await ctx.db.query(
+      `SELECT status, attempts FROM deliveries WHERE notification_id = $1`,
+      [res.json().notification_id],
+    ));
+    expect(rows[0]).toMatchObject({ status: 'sent', attempts: 1 });
+    expect(sends).toBe(1);
+  });
+
+  it('al cumplir una hora queda expired y conserva el registro sin enviar', async () => {
+    ctx.fake.behavior = { health: { ok: false, detail: { gsm_registered: false } } };
+    const res = await post({ recipients: ['+51987654321'], message: 'incidente antiguo' });
+    await worker.runOnce('sms');
+    await ctx.db.query(
+      `UPDATE deliveries SET first_attempt_at = now() - interval '61 minutes', next_retry_at = now()
+       WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    ctx.fake.behavior = {};
+    await worker.runOnce('sms');
+    const { rows } = await ctx.db.query(
+      `SELECT status, attempts, last_error FROM deliveries WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    expect(rows[0]).toMatchObject({ status: 'expired', attempts: 0 });
+    expect(rows[0].last_error).toContain('ventana de reintento');
+    expect(ctx.fake.sentJobs).toHaveLength(0);
+  });
+
+  it('uncertain pausa el canal y se reconcilia por smskey sin duplicar', async () => {
+    let reconciled = false;
+    ctx.fake.behavior = {
+      onSend: () => ({
+        outcome: 'uncertain', countsAsAttempt: true, providerId: 'late-key', retryAfterMs: 1,
+        error: 'sin DONE',
+      }),
+      onReconcile: (providerId) => reconciled
+        ? { outcome: 'sent', countsAsAttempt: false, providerId }
+        : { outcome: 'uncertain', countsAsAttempt: false, providerId, retryAfterMs: 1, error: 'STARTED' },
+    };
+    const first = await post({ recipients: ['+51987654321'], message: 'primera' });
+    const second = await post({ recipients: ['+51987654321'], message: 'segunda' });
+    await worker.runOnce('sms');
+    await ctx.db.query(`UPDATE deliveries SET next_retry_at = now() WHERE notification_id = $1`, [first.json().notification_id]);
+    await worker.runOnce('sms');
+    let { rows } = await ctx.db.query(
+      `SELECT n.message, d.status, d.attempts FROM deliveries d
+       JOIN notifications n ON n.id = d.notification_id ORDER BY n.created_at`,
+    );
+    expect(rows).toEqual([
+      { message: 'primera', status: 'uncertain', attempts: 1 },
+      { message: 'segunda', status: 'queued', attempts: 0 },
+    ]);
+
+    reconciled = true;
+    await ctx.db.query(`UPDATE deliveries SET next_retry_at = now() WHERE notification_id = $1`, [first.json().notification_id]);
+    await worker.runOnce('sms');
+    ctx.fake.behavior = {};
+    await worker.runOnce('sms');
+    ({ rows } = await ctx.db.query(
+      `SELECT n.message, d.status, d.attempts FROM deliveries d
+       JOIN notifications n ON n.id = d.notification_id ORDER BY n.created_at`,
+    ));
+    expect(rows).toEqual([
+      { message: 'primera', status: 'sent', attempts: 1 },
+      { message: 'segunda', status: 'sent', attempts: 1 },
+    ]);
+    expect(second.statusCode).toBe(202);
   });
 
   it('recupera deliveries con lock viejo', async () => {
@@ -547,6 +661,50 @@ describe('reintentos y fallos', () => {
     const recovered = await worker.recoverStaleLocks();
     expect(recovered).toBe(1);
     expect(await drainQueue(ctx, worker)).toBe(1);
+  });
+
+  it('stop interrumpe los sleeps del worker sin esperar el ciclo de 60 segundos', async () => {
+    const local = new Worker(ctx.db, ctx.providers, silentLog);
+    local.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(Promise.race([
+      local.stop().then(() => 'stopped'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 500)),
+    ])).resolves.toBe('stopped');
+  });
+
+  it('lock viejo ya aceptado pasa a uncertain y no se reenvía', async () => {
+    const res = await post({ recipients: ['+51987654321'], message: 'aceptada antes del crash' });
+    await ctx.db.query(
+      `UPDATE deliveries SET status = 'processing', locked_at = now() - interval '10 minutes',
+         provider_id = 'crash-key', submitted_at = now() - interval '10 minutes', first_attempt_at = now() - interval '10 minutes'
+       WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    expect(await worker.recoverStaleLocks()).toBe(1);
+    const { rows } = await ctx.db.query(
+      `SELECT status, attempts, provider_id FROM deliveries WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    expect(rows[0]).toEqual({ status: 'uncertain', attempts: 1, provider_id: 'crash-key' });
+  });
+
+  it('lock viejo iniciado sin smskey pasa a uncertain y no se reenvía', async () => {
+    const res = await post({ recipients: ['+51987654321'], message: 'crash durante send.html' });
+    await ctx.db.query(
+      `UPDATE deliveries SET status = 'processing', locked_at = now() - interval '10 minutes',
+         send_started_at = now() - interval '10 minutes', first_attempt_at = now() - interval '10 minutes'
+       WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    expect(await worker.recoverStaleLocks()).toBe(1);
+    const { rows } = await ctx.db.query(
+      `SELECT status, attempts, provider_id, last_error FROM deliveries WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    expect(rows[0]).toMatchObject({ status: 'uncertain', attempts: 1, provider_id: null });
+    expect(rows[0].last_error).toContain('interrumpido durante el envío');
+    expect(ctx.fake.sentJobs).toHaveLength(0);
   });
 });
 
@@ -597,5 +755,26 @@ describe('consulta y health', () => {
     expect(res.json().ok).toBe(false);
     expect(res.json().checks.db).toContain('db unavailable');
     expect(res.json().checks.queue).toMatchObject({ state: 'unknown' });
+  });
+
+  it('GET /health se degrada si el poller de entrantes queda obsoleto', async () => {
+    await ctx.db.query(
+      `UPDATE service_health SET last_success_at = now() - interval '10 minutes',
+         last_error_at = NULL, last_error = NULL, detail = '{}' WHERE component = 'inbound_poller'`,
+    );
+    const res = await ctx.app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().checks.inbound_poller).toMatchObject({ state: 'degraded' });
+    expect(res.json().ok).toBe(false);
+  });
+
+  it('GET /health se degrada si el poller nunca completa su primer ciclo', async () => {
+    await ctx.db.query(
+      `UPDATE service_health SET last_success_at = NULL, last_error_at = NULL,
+         updated_at = now() - interval '10 minutes' WHERE component = 'inbound_poller'`,
+    );
+    const res = await ctx.app.inject({ method: 'GET', url: '/health' });
+    expect(res.json().checks.inbound_poller).toMatchObject({ state: 'degraded', last_success_at: null });
+    expect(res.json().ok).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { normalizeRecipient } from './sms-text.js';
+import { parseTrustedProxies } from './trust-proxy.js';
 
 function required(name: string): string {
   const v = process.env[name];
@@ -24,8 +25,8 @@ export const config = {
   databaseUrl: required('DATABASE_URL'),
   workerDisabled: process.env.WORKER_DISABLED === 'true',
   systemAlertRecipients: recipients('SYSTEM_ALERT_RECIPIENTS'),
-  // detrás de un reverse proxy (nginx del VPS): usar X-Forwarded-For como IP real
-  trustProxy: process.env.TRUST_PROXY === 'true',
+  // Solo los proxies listados pueden aportar la IP real mediante X-Forwarded-For.
+  trustProxy: parseTrustedProxies(process.env.TRUST_PROXY),
   smsProvider: process.env.SMS_PROVIDER ?? 'fake',
   goip: {
     baseUrl: process.env.GOIP_BASE_URL ?? '',

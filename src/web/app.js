@@ -94,7 +94,7 @@ async function loadDashboard() {
   const data = await api('/overview');
   const s = data.last24h;
   const queue = data.queue;
-  const failed = (s.failed ?? 0) + (s.exhausted ?? 0);
+  const failed = (s.failed ?? 0) + (s.exhausted ?? 0) + (s.expired ?? 0);
   const queueClass = queue.state === 'full' || queue.state === 'critical_only'
     ? 'err'
     : queue.state === 'warning' ? 'warn' : 'ok';
@@ -104,8 +104,9 @@ async function loadDashboard() {
     counterCard('Más antigua lista', fmtDuration(queue.oldestReadyS), queueClass) +
     counterCard('Vaciado estimado', fmtDuration(queue.estimatedDrainS), queueClass) +
     counterCard('Fallidos (24 h)', failed, failed ? 'err' : '') +
+    counterCard('Inciertos (24 h)', s.uncertain ?? 0, s.uncertain ? 'err' : '') +
     counterCard('Suprimidos (24 h)', s.suppressed ?? 0);
-  $('#provider-health').innerHTML = Object.entries(data.providers).map(([ch, h]) => {
+  const providerCards = Object.entries(data.providers).map(([ch, h]) => {
     const d = h.detail || {};
     if (d.provider === 'fake') return counterCard(`Canal ${ch}`, 'fake', 'warn');
     if (!h.ok) {
@@ -114,6 +115,23 @@ async function loadDashboard() {
     }
     return signalCard(ch, d);
   }).join('');
+  const inbound = data.serviceHealth?.find((item) => item.component === 'inbound_poller');
+  const inbox = inbound?.detail?.sms;
+  const inboundFailed = Boolean(inbound?.last_error_at &&
+    (!inbound.last_success_at || new Date(inbound.last_error_at) > new Date(inbound.last_success_at)));
+  const inboundStale = Number(inbound?.reference_age_s ?? 0) > data.inboundStaleAfterS;
+  const inboundCard = !inbound?.last_success_at && inboundStale
+    ? counterCard('Entrantes GOIP', 'sin primer ciclo', 'err')
+    : !inbound?.last_success_at
+    ? counterCard('Entrantes GOIP', 'iniciando', 'warn')
+    : inboundStale
+      ? counterCard('Entrantes GOIP', `sin ciclo hace ${fmtDuration(inbound.age_s)}`, 'err')
+    : inbox?.at_capacity
+      ? counterCard('Entrantes GOIP', `${inbox.visible}/${inbox.capacity} lleno`, 'err')
+      : inboundFailed
+        ? counterCard('Entrantes GOIP', 'poll fallido', 'err')
+        : counterCard('Entrantes GOIP', `${inbox?.visible ?? 0}/${inbox?.capacity ?? '?'} visibles`, 'ok');
+  $('#provider-health').innerHTML = providerCards + inboundCard;
   $('#recent-table tbody').innerHTML = data.recent.map((n) => `
     <tr data-id="${n.id}">
       <td>${fmtDate(n.created_at)}</td><td>${esc(n.source)}</td>
@@ -186,20 +204,28 @@ async function showDetail(id) {
     ${n.deliveries.map((d) => `
       <tr>
         <td>${esc(d.recipient)}</td><td>${d.part}/${d.parts}</td>
-        <td><span class="badge ${['sent','delivered'].includes(d.status) ? 'sent' : ['failed','exhausted'].includes(d.status) ? 'failed' : ['queued','retrying','processing'].includes(d.status) ? 'pending' : 'suppressed'}">${d.status}</span></td>
+        <td><span class="badge ${['sent','delivered'].includes(d.status) ? 'sent' : ['failed','exhausted','expired'].includes(d.status) ? 'failed' : ['queued','retrying','processing'].includes(d.status) ? 'pending' : d.status === 'uncertain' ? 'failed' : 'suppressed'}">${d.status}</span></td>
         <td>${d.attempts}</td>
         <td class="msg" title="${esc(d.last_error ?? '')}">${esc(d.last_error ?? '—')}</td>
         <td>${fmtDate(d.sent_at)}</td>
         <td class="actions">
-          ${['failed','exhausted','cancelled','suppressed'].includes(d.status) ? `<button data-act="retry" data-id="${d.id}">Reintentar</button>` : ''}
+          ${['failed','exhausted','expired','cancelled','suppressed'].includes(d.status) ? `<button data-act="retry" data-id="${d.id}">Reintentar</button>` : ''}
           ${['queued','retrying'].includes(d.status) ? `<button data-act="cancel" data-id="${d.id}" class="ghost">Cancelar</button>` : ''}
+          ${d.status === 'uncertain' ? `<button data-act="resolve-uncertain" data-status="sent" data-id="${d.id}">Marcar enviado</button><button data-act="resolve-uncertain" data-status="failed" data-id="${d.id}" class="ghost">Marcar fallido</button>` : ''}
         </td>
       </tr>`).join('')}
     </tbody></table>`;
   box.querySelectorAll('[data-act]').forEach((btn) => btn.addEventListener('click', async (e) => {
     e.stopPropagation();
+    if (btn.dataset.act === 'resolve-uncertain') {
+      const label = btn.dataset.status === 'sent' ? 'enviado' : 'fallido';
+      if (!confirm(`¿Marcar este resultado incierto como ${label}? Esta acción libera el canal SMS.`)) return;
+    }
     try {
-      await api(`/deliveries/${btn.dataset.id}/${btn.dataset.act}`, { method: 'POST' });
+      await api(`/deliveries/${btn.dataset.id}/${btn.dataset.act}`, {
+        method: 'POST',
+        ...(btn.dataset.status ? { body: { status: btn.dataset.status } } : {}),
+      });
       showDetail(id);
     } catch (err) { alert(err.message); }
   }));
@@ -347,15 +373,15 @@ const SETTING_META = {
   },
   send_gap_ms: {
     section: 'Operación', label: 'Pausa entre SMS', summary: 'Espera mínima entre dos envíos al GOIP, en milisegundos.',
-    detail: ['Protege el módem evitando envíos consecutivos demasiado rápidos. No modifica los límites por hora.'], min: 1,
+    detail: ['Protege el módem evitando envíos consecutivos demasiado rápidos. No modifica los límites por hora.'], min: 1000,
   },
   poll_ms: {
     section: 'Operación', label: 'Intervalo de cola', summary: 'Frecuencia con que el worker busca SMS pendientes.',
-    detail: ['Un valor menor reduce latencia, pero consulta PostgreSQL con mayor frecuencia. Se expresa en milisegundos.'], min: 1,
+    detail: ['Un valor menor reduce latencia, pero consulta PostgreSQL con mayor frecuencia. Se expresa en milisegundos.'], min: 250,
   },
   max_attempts: {
     section: 'Operación', label: 'Intentos máximos', summary: 'Cantidad máxima de intentos antes de marcar un envío agotado.',
-    detail: ['Incluye el primer intento y los reintentos que consumen intento. Los errores clasificados como busy tendrán reglas propias en una tanda posterior.'], min: 1,
+    detail: ['Incluye el primer intento y los reintentos entregados al provider. Busy, GSM logout y consultas de reconciliación no consumen intentos.'], min: 1,
   },
   retry_backoff_s: {
     section: 'Operación', label: 'Espera entre reintentos', summary: 'Secuencia de esperas en segundos, escrita como arreglo JSON.',
@@ -363,11 +389,23 @@ const SETTING_META = {
   },
   dedup_window_s: {
     section: 'Operación', label: 'Ventana de deduplicación', summary: 'Tiempo durante el que una dedup_key repetida se suprime.',
-    detail: ['La primera notificación se envía inmediatamente. Las repeticiones se cuentan para el panel y no generan nuevas deliveries. Se expresa en segundos.'], min: 1,
+    detail: ['La primera notificación se envía inmediatamente. Las repeticiones se cuentan para el panel y no generan nuevas deliveries. Se expresa en segundos.'], min: 0,
+  },
+  retry_window_s: {
+    section: 'Operación', label: 'Ventana máxima de reintento', summary: 'Tiempo máximo para reintentar automáticamente un incidente.',
+    detail: ['Se cuenta desde la primera evaluación de la delivery por el worker. Al vencer, queda expired y se conserva; un reintento manual abre una ventana nueva. Valor acordado: 3600 segundos.'], min: 60,
+  },
+  unavailable_retry_s: {
+    section: 'Operación', label: 'Espera si GOIP no está disponible', summary: 'Pausa antes de reevaluar GSM logout o health degradado.',
+    detail: ['No consume intentos. Permite que otras deliveries sean evaluadas y comiencen su propia ventana sin intentar transmitir mientras el GOIP está desregistrado.'], min: 1,
+  },
+  uncertain_poll_s: {
+    section: 'Operación', label: 'Consulta de envío incierto', summary: 'Frecuencia de reconciliación del smskey pendiente.',
+    detail: ['Mientras exista un uncertain no se envían nuevos SMS, porque el GOIP solo conserva el estado actual de la línea. Se expresa en segundos.'], min: 1,
   },
   inbound_poll_ms: {
     section: 'Operación', label: 'Consulta de entrantes', summary: 'Frecuencia de lectura del inbox del GOIP.',
-    detail: ['Controla cada cuántos milisegundos se consultan SMS entrantes. No afecta el envío de alertas.'], min: 1,
+    detail: ['Controla cada cuántos milisegundos se consultan SMS entrantes. No afecta el envío de alertas.'], min: 1000,
   },
   api_key_warning: {
     label: 'Aviso por API key', detail: [

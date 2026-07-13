@@ -72,6 +72,37 @@ export function registerRoutes(
         absolute_limit: settings.queue_normal_limit + settings.queue_critical_reserve,
       };
       if (queueState === 'critical_only' || queueState === 'full') ok = false;
+      const { rows: inboundRows } = await db.query<{
+        last_success_at: Date | null;
+        last_error_at: Date | null;
+        last_error: string | null;
+        detail: Record<string, { at_capacity?: boolean }>;
+        age_s: string | null;
+        reference_age_s: string;
+      }>(
+        `SELECT last_success_at, last_error_at, last_error, detail,
+                extract(epoch FROM now() - last_success_at)::int::text AS age_s,
+                extract(epoch FROM now() - COALESCE(last_success_at, updated_at))::int::text AS reference_age_s
+         FROM service_health WHERE component = 'inbound_poller'`,
+      );
+      const inbound = inboundRows[0];
+      const staleAfterS = Math.max(60, Math.ceil(settings.inbound_poll_ms * 3 / 1000));
+      const stale = inbound?.last_success_at ? Number(inbound.age_s) > staleAfterS : false;
+      const neverStartedStale = Boolean(inbound && !inbound.last_success_at && Number(inbound.reference_age_s) > staleAfterS);
+      const failedAfterSuccess = Boolean(inbound?.last_error_at &&
+        (!inbound.last_success_at || inbound.last_error_at > inbound.last_success_at));
+      const atCapacity = Object.values(inbound?.detail ?? {}).some((detail) => detail.at_capacity);
+      checks.inbound_poller = {
+        state: !inbound?.last_success_at
+          ? neverStartedStale ? 'degraded' : 'starting'
+          : stale || failedAfterSuccess || atCapacity ? 'degraded' : 'ok',
+        last_success_at: inbound?.last_success_at ?? null,
+        last_error_at: inbound?.last_error_at ?? null,
+        last_error: inbound?.last_error ?? null,
+        age_s: inbound?.age_s === null || inbound?.age_s === undefined ? null : Number(inbound.age_s),
+        detail: inbound?.detail ?? {},
+      };
+      if (stale || neverStartedStale || failedAfterSuccess || atCapacity) ok = false;
     } catch (err) {
       checks.queue = { state: 'unknown', error: String(err) };
       ok = false;
@@ -157,7 +188,8 @@ export function registerRoutes(
       if (!notif) return reply.code(404).send({ error: 'Notificación no encontrada' });
       const { rows: deliveries } = await db.query(
         `SELECT id, recipient, payload, part, parts, status, attempts, next_retry_at,
-                provider_id, last_error, created_at, sent_at, finished_at
+                provider_id, last_error, first_attempt_at, send_started_at, submitted_at, last_reconciled_at,
+                created_at, sent_at, finished_at
          FROM deliveries WHERE notification_id = $1 ORDER BY recipient, part`,
         [req.params.id],
       );

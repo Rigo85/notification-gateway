@@ -13,7 +13,7 @@ import type { ChannelProvider } from './providers/types.js';
 export interface AppOptions {
   sessionSecret?: string;
   events?: EventEmitter;
-  trustProxy?: boolean;
+  trustProxy?: boolean | string[];
   systemAlertRecipients?: string[];
 }
 

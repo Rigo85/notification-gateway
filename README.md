@@ -44,7 +44,16 @@ curl -X POST localhost:8090/api/notifications \
 Endpoints: `POST /api/notifications`, `GET /api/notifications/:id`, `GET /health`.
 
 Estados de una delivery: `queued → processing → sent` con
-`retrying/exhausted/failed/suppressed/cancelled` según el caso.
+`retrying/exhausted/failed/suppressed/cancelled/expired/uncertain` según el caso. Los
+reintentos automáticos se permiten durante una hora desde la primera evaluación del
+worker; después la delivery queda `expired`, sin borrar su contenido. Un reintento manual
+abre una ventana nueva.
+
+Si el GOIP acepta un envío pero no se puede confirmar su resultado, la delivery queda
+`uncertain` y pausa el canal SMS. El worker consulta el `smskey` hasta obtener `DONE`; si el
+equipo ya no conserva ese estado, el panel permite resolverlo manualmente como enviado o
+fallido antes de liberar el canal. `L1 busy`, GSM desregistrado y health degradado no
+consumen intentos.
 Protecciones: dedup por ventana (15 min), límites atómicos por hora (global /
 destinatario / API key), reserva crítica, alerta administrativa de corte y división
 íntegra de mensajes largos (≤160 ASCII / ≤70 Unicode, máximo 9 partes). Los umbrales
@@ -64,6 +73,11 @@ salud del GOIP, envío de prueba), Notificaciones (filtros, detalle, reintentar/
 API Keys (crear/revocar) y Configuración (parámetros operativos en caliente).
 Se actualiza en vivo por SSE.
 
+El dashboard también muestra el estado del poller de entrantes y alerta si no completa
+ciclos, si queda obsoleto o si el buffer visible del GOIP alcanza sus 20 posiciones. La
+lectura no borra mensajes del equipo; se conserva tanto su hora cruda como una fecha
+derivada para ordenarlos.
+
 ## Despliegue (PM2)
 
 ```bash
@@ -78,6 +92,7 @@ npm ci && npm run build
 #    DATABASE_URL=postgres://postgres:...@localhost:5432/notification_gateway
 #    SESSION_SECRET=$(openssl rand -hex 32)
 #    SMS_PROVIDER=goip  +  GOIP_BASE_URL/USER/PASSWORD
+#    TRUST_PROXY=<IP/CIDR del proxy> (nunca true), o false sin proxy
 
 # 4. migraciones corren solas al arrancar; configurar SYSTEM_ALERT_RECIPIENTS
 #    con el mismo destinatario operativo de Atalaya y crear admin/keys:

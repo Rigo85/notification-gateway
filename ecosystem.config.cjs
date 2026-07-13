@@ -7,6 +7,7 @@ module.exports = {
       env: { NODE_ENV: 'production' },
       max_restarts: 10,
       restart_delay: 5000,
+      kill_timeout: 10000,
     },
   ],
 };
