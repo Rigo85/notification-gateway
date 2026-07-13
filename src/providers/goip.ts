@@ -60,12 +60,15 @@ export class GoipProvider implements ChannelProvider {
   }
 
   async send(job: DeliveryJob): Promise<SendResult> {
+    // Quirk del firmware (verificado 2026-07-12): un mensaje que EMPIEZA con '['
+    // falla siempre con error 500; con '[' en medio del texto funciona.
+    const payload = job.payload.startsWith('[') ? `.${job.payload}` : job.payload;
     const params = new URLSearchParams({
       u: this.cfg.user,
       p: this.cfg.password,
       l: '1',
       n: job.recipient.replace(/^\+/, ''),
-      m: job.payload,
+      m: payload,
     });
     const raw = await this.httpText(`${this.cfg.baseUrl}/default/en_US/send.html?${params}`);
     const text = raw.trim();

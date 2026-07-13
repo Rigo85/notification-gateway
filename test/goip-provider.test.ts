@@ -41,6 +41,19 @@ describe('GoipProvider.send', () => {
     expect(sendUrl).toContain('m=conexi%C3%B3n+ca%C3%ADda');
   });
 
+  it('corchete inicial se antepone con punto (quirk del firmware: 500)', async () => {
+    let sendUrl = '';
+    const p = provider((url) => {
+      if (url.includes('send.html')) {
+        sendUrl = url;
+        return 'Sending,L1 Send SMS to:51987654321; ID:q1';
+      }
+      return statusXml('q1', 'DONE');
+    });
+    await p.send({ ...JOB, payload: '[PM2] algo paso' });
+    expect(sendUrl).toContain('m=.%5BPM2%5D');
+  });
+
   it('L1 busy → fallo retryable', async () => {
     const result = await provider(() => 'ERROR,L1 busy').send(JOB);
     expect(result.ok).toBe(false);
