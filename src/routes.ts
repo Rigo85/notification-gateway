@@ -76,7 +76,7 @@ export function registerRoutes(
         last_success_at: Date | null;
         last_error_at: Date | null;
         last_error: string | null;
-        detail: Record<string, { at_capacity?: boolean }>;
+        detail: Record<string, { visible?: number; window_size?: number | null }>;
         age_s: string | null;
         reference_age_s: string;
       }>(
@@ -91,18 +91,17 @@ export function registerRoutes(
       const neverStartedStale = Boolean(inbound && !inbound.last_success_at && Number(inbound.reference_age_s) > staleAfterS);
       const failedAfterSuccess = Boolean(inbound?.last_error_at &&
         (!inbound.last_success_at || inbound.last_error_at > inbound.last_success_at));
-      const atCapacity = Object.values(inbound?.detail ?? {}).some((detail) => detail.at_capacity);
       checks.inbound_poller = {
         state: !inbound?.last_success_at
           ? neverStartedStale ? 'degraded' : 'starting'
-          : stale || failedAfterSuccess || atCapacity ? 'degraded' : 'ok',
+          : stale || failedAfterSuccess ? 'degraded' : 'ok',
         last_success_at: inbound?.last_success_at ?? null,
         last_error_at: inbound?.last_error_at ?? null,
         last_error: inbound?.last_error ?? null,
         age_s: inbound?.age_s === null || inbound?.age_s === undefined ? null : Number(inbound.age_s),
         detail: inbound?.detail ?? {},
       };
-      if (stale || neverStartedStale || failedAfterSuccess || atCapacity) ok = false;
+      if (stale || neverStartedStale || failedAfterSuccess) ok = false;
     } catch (err) {
       checks.queue = { state: 'unknown', error: String(err) };
       ok = false;

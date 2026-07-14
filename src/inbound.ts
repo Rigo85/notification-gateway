@@ -61,15 +61,10 @@ export class InboundPoller {
       for (const [channel, provider] of this.providers) {
         if (!provider.fetchInbox) continue;
         const messages = await provider.fetchInbox(signal);
-        const capacity = provider.inboxCapacity;
-        const atCapacity = capacity !== undefined && messages.length >= capacity;
-        detail[channel] = { visible: messages.length, capacity: capacity ?? null, at_capacity: atCapacity };
-        if (atCapacity) {
-          this.log.error(
-            { channel, visible: messages.length, capacity },
-            'inbox del provider lleno; pueden haberse sobrescrito mensajes anteriores',
-          );
-        }
+        detail[channel] = {
+          visible: messages.length,
+          window_size: provider.inboxCapacity ?? null,
+        };
         for (const msg of [...messages].reverse()) {
           const hash = createHash('sha256')
             .update(`${channel}|${msg.deviceTime}|${msg.sender}|${msg.body}`)

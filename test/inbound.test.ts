@@ -88,7 +88,7 @@ describe('InboundPoller', () => {
     expect(health.rows[0].last_error).toBeNull();
   });
 
-  it('marca el health degradable cuando el buffer visible está lleno', async () => {
+  it('trata una ventana visible completa como información, no como saturación', async () => {
     ctx.fake.inboxCapacity = 2;
     ctx.fake.inbox = [
       { deviceTime: '07-12 10:00:00', sender: '1', body: 'a' },
@@ -96,7 +96,9 @@ describe('InboundPoller', () => {
     ];
     await poller.pollOnce();
     const health = await ctx.db.query(`SELECT detail FROM service_health WHERE component = 'inbound_poller'`);
-    expect(health.rows[0].detail.sms).toMatchObject({ visible: 2, capacity: 2, at_capacity: true });
+    expect(health.rows[0].detail.sms).toEqual({ visible: 2, window_size: 2 });
+    const response = await ctx.app.inject({ method: 'GET', url: '/health' });
+    expect(response.json().checks.inbound_poller).toMatchObject({ state: 'ok' });
   });
 
   it('stop interrumpe inmediatamente una espera larga', async () => {

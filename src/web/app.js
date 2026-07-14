@@ -126,11 +126,9 @@ async function loadDashboard() {
     ? counterCard('Entrantes GOIP', 'iniciando', 'warn')
     : inboundStale
       ? counterCard('Entrantes GOIP', `sin ciclo hace ${fmtDuration(inbound.age_s)}`, 'err')
-    : inbox?.at_capacity
-      ? counterCard('Entrantes GOIP', `${inbox.visible}/${inbox.capacity} lleno`, 'err')
-      : inboundFailed
-        ? counterCard('Entrantes GOIP', 'poll fallido', 'err')
-        : counterCard('Entrantes GOIP', `${inbox?.visible ?? 0}/${inbox?.capacity ?? '?'} visibles`, 'ok');
+    : inboundFailed
+      ? counterCard('Entrantes GOIP', 'poll fallido', 'err')
+      : counterCard('Entrantes GOIP', `${inbox?.visible ?? 0} visibles`, 'ok');
   $('#provider-health').innerHTML = providerCards + inboundCard;
   $('#recent-table tbody').innerHTML = data.recent.map((n) => `
     <tr data-id="${n.id}">

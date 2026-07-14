@@ -45,6 +45,6 @@ export interface ChannelProvider {
   health(signal?: AbortSignal): Promise<HealthStatus>;
   /** lee los mensajes entrantes visibles (sin consumirlos del equipo) */
   fetchInbox?(signal?: AbortSignal): Promise<InboundSms[]>;
-  /** Capacidad visible del buffer entrante, si el equipo la expone como límite fijo. */
+  /** Tamaño máximo de la ventana visible; no implica ocupación ni saturación. */
   inboxCapacity?: number;
 }

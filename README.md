@@ -73,10 +73,11 @@ salud del GOIP, envío de prueba), Notificaciones (filtros, detalle, reintentar/
 API Keys (crear/revocar) y Configuración (parámetros operativos en caliente).
 Se actualiza en vivo por SSE.
 
-El dashboard también muestra el estado del poller de entrantes y alerta si no completa
-ciclos, si queda obsoleto o si el buffer visible del GOIP alcanza sus 20 posiciones. La
-lectura no borra mensajes del equipo; se conserva tanto su hora cruda como una fecha
-derivada para ordenarlos.
+El dashboard también muestra el estado del poller y la cantidad de entrantes visibles. Las
+20 posiciones del GOIP son una ventana histórica rodante, no una cola ni una señal de
+saturación: un mensaje nuevo aparece arriba y puede desplazar al más antiguo. El health se
+degrada por ciclos fallidos u obsoletos, no por ver 20 entradas. La lectura no borra mensajes
+del equipo; se conserva tanto su hora cruda como una fecha derivada para ordenarlos.
 
 ## Despliegue (PM2)
 
