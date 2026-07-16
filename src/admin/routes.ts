@@ -423,6 +423,7 @@ export function registerAdminRoutes(
         'retry_window_s',
         'unavailable_retry_s',
         'uncertain_poll_s',
+        'uncertain_without_smskey_retry_s',
         'inbound_poll_ms',
       ]);
       const entries = Object.entries(req.body).filter(([k]) => editable.has(k));

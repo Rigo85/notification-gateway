@@ -49,7 +49,7 @@ export async function resetData(db: Db, token: string): Promise<void> {
       ('queue_warning_depth', '20'), ('queue_normal_limit', '60'),
       ('queue_critical_reserve', '20'), ('queue_warning_oldest_s', '300'),
       ('queue_hard_oldest_s', '900'), ('retry_window_s', '3600'),
-      ('unavailable_retry_s', '30'), ('uncertain_poll_s', '10'),
+      ('unavailable_retry_s', '30'), ('uncertain_poll_s', '10'), ('uncertain_without_smskey_retry_s', '60'),
       ('inbound_poll_ms', '10000')
      ) AS d(k, v) WHERE settings.key = d.k`,
   );

@@ -158,11 +158,15 @@ export class Worker {
       );
       this.log.info({ deliveryId: claimed.id, channel: 'sms' }, 'delivery enviada');
     } else if (result.outcome === 'uncertain') {
-      const retryMs = result.retryAfterMs ?? settings.uncertain_poll_s * 1000;
+      const retryMs = result.retryAfterMs ?? (result.providerId
+        ? settings.uncertain_poll_s * 1000
+        : settings.uncertain_without_smskey_retry_s * 1000);
       await this.db.query(
         `UPDATE deliveries SET status = 'uncertain', attempts = $2, locked_at = NULL,
-           provider_id = COALESCE($3, provider_id), provider_response = $4, last_error = $5,
-           next_retry_at = now() + $6 * interval '1 millisecond'
+         provider_id = COALESCE($3, provider_id),
+         provider_response = COALESCE(provider_response, '{}'::jsonb) || COALESCE($4::jsonb, '{}'::jsonb),
+         last_error = $5,
+         next_retry_at = now() + $6 * interval '1 millisecond'
          WHERE id = $1`,
         [claimed.id, attempts, result.providerId ?? null, jsonb(result.response), result.error, retryMs],
       );
@@ -202,7 +206,10 @@ export class Worker {
     delivery: UncertainDelivery,
     settings: Settings,
   ): Promise<boolean> {
-    if (!provider.reconcile || !delivery.provider_id) {
+    if (!delivery.provider_id) {
+      return this.retryWithoutSmskey(delivery);
+    }
+    if (!provider.reconcile) {
       await this.deferUncertain(delivery.id, settings.uncertain_poll_s, 'reconciliación manual requerida');
       return false;
     }
@@ -231,10 +238,31 @@ export class Worker {
     const { rows } = await this.db.query<UncertainDelivery>(
       `SELECT id, recipient, payload, attempts, first_attempt_at, provider_id, next_retry_at
        FROM deliveries WHERE channel = $1 AND status = 'uncertain'
+         AND (provider_id IS NOT NULL OR attempts < 2)
        ORDER BY created_at ASC LIMIT 1`,
       [channel],
     );
     return rows[0] ?? null;
+  }
+
+  /**
+   * Sin smskey no existe forma de reconciliar el slot del GOIP. Se permite un solo
+   * reintento, se conserva el primer error y un segundo incierto deja de pausar la cola.
+   */
+  private async retryWithoutSmskey(delivery: UncertainDelivery): Promise<boolean> {
+    await this.db.query(
+      `UPDATE deliveries SET status = 'retrying', locked_at = NULL, next_retry_at = now(),
+         last_reconciled_at = now(),
+         provider_response = COALESCE(provider_response, '{}'::jsonb) ||
+           jsonb_build_object('uncertain_without_smskey_first_error', last_error),
+         last_error = 'reintento único tras resultado incierto sin smskey',
+         send_started_at = NULL, submitted_at = NULL, provider_id = NULL
+       WHERE id = $1 AND status = 'uncertain' AND provider_id IS NULL AND attempts < 2`,
+      [delivery.id],
+    );
+    this.log.warn({ deliveryId: delivery.id }, 'delivery sin smskey reintentada una vez; la cola continúa después');
+    this.events?.emit('change');
+    return true;
   }
 
   private async claim(channel: string): Promise<ClaimedDelivery | null> {

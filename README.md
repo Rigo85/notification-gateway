@@ -50,10 +50,11 @@ worker; después la delivery queda `expired`, sin borrar su contenido. Un reinte
 abre una ventana nueva.
 
 Si el GOIP acepta un envío pero no se puede confirmar su resultado, la delivery queda
-`uncertain` y pausa el canal SMS. El worker consulta el `smskey` hasta obtener `DONE`; si el
-equipo ya no conserva ese estado, el panel permite resolverlo manualmente como enviado o
-fallido antes de liberar el canal. `L1 busy`, GSM desregistrado y health degradado no
-consumen intentos.
+`uncertain` y pausa el canal SMS. Con `smskey`, el worker consulta el GOIP hasta obtener
+`DONE`. Sin `smskey`, espera 60 segundos y hace un único reintento: puede duplicar el SMS,
+pero evita que una respuesta perdida congele el canal. Si ese reintento también queda
+incierto, la delivery se conserva para resolución manual y las posteriores continúan.
+`L1 busy`, GSM desregistrado y health degradado no consumen intentos.
 Protecciones: dedup por ventana (15 min), límites atómicos por hora (global /
 destinatario / API key), reserva crítica, alerta administrativa de corte y división
 íntegra de mensajes largos (≤160 ASCII / ≤70 Unicode, máximo 9 partes). Los umbrales

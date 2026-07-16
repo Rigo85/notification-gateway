@@ -651,6 +651,39 @@ describe('reintentos y fallos', () => {
     expect(second.statusCode).toBe(202);
   });
 
+  it('uncertain sin smskey se reintenta una vez y luego no bloquea el canal', async () => {
+    let firstAttempts = 0;
+    ctx.fake.behavior = {
+      onSend: (job) => {
+        if (job.payload === 'sin smskey') {
+          firstAttempts++;
+          return { outcome: 'uncertain', countsAsAttempt: true, error: 'respuesta perdida' };
+        }
+        return { outcome: 'sent', countsAsAttempt: true, providerId: 'second-ok' };
+      },
+    };
+    const first = await post({ recipients: ['+51987654321'], message: 'sin smskey' });
+    const second = await post({ recipients: ['+51987654321'], message: 'continúa cola' });
+
+    await worker.runOnce('sms');
+    await ctx.db.query(`UPDATE deliveries SET next_retry_at = now() WHERE notification_id = $1`, [first.json().notification_id]);
+    await worker.runOnce('sms'); // libera el único reintento
+    await worker.runOnce('sms'); // segundo intento del incierto
+    await worker.runOnce('sms'); // la siguiente delivery ya no queda bloqueada
+
+    const { rows } = await ctx.db.query(
+      `SELECT n.message, d.status, d.attempts, d.provider_response
+       FROM deliveries d JOIN notifications n ON n.id = d.notification_id ORDER BY n.created_at`,
+    );
+    expect(rows[0]).toMatchObject({ message: 'sin smskey', status: 'uncertain', attempts: 2 });
+    expect(rows[0].provider_response).toMatchObject({ uncertain_without_smskey_first_error: 'respuesta perdida' });
+    expect(rows[1]).toMatchObject({ message: 'continúa cola', status: 'sent', attempts: 1 });
+    expect(firstAttempts).toBe(2);
+    expect(await worker.runOnce('sms')).toBe(false);
+    expect(firstAttempts).toBe(2);
+    expect(second.statusCode).toBe(202);
+  });
+
   it('recupera deliveries con lock viejo', async () => {
     const res = await post({ recipients: ['+51987654321'], message: 'x' });
     await ctx.db.query(

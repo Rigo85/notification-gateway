@@ -401,6 +401,14 @@ const SETTING_META = {
     section: 'Operación', label: 'Consulta de envío incierto', summary: 'Frecuencia de reconciliación del smskey pendiente.',
     detail: ['Mientras exista un uncertain no se envían nuevos SMS, porque el GOIP solo conserva el estado actual de la línea. Se expresa en segundos.'], min: 1,
   },
+  uncertain_without_smskey_retry_s: {
+    section: 'Operación', label: 'Espera antes de reintento sin smskey', summary: 'Demora antes de un único reintento cuando GOIP no devolvió identificador.',
+    detail: [
+      'Sin smskey no se puede asociar la delivery con el único estado que conserva el GOIP. Tras esta espera se hace un solo reintento, que puede producir un SMS duplicado.',
+      'Si ese segundo intento también queda incierto, se conserva para revisión manual pero ya no bloquea las deliveries posteriores.',
+      'Se expresa en segundos. El valor inicial de 60 segundos da tiempo al módem a terminar una solicitud cuya respuesta se perdió.',
+    ], min: 10,
+  },
   inbound_poll_ms: {
     section: 'Operación', label: 'Consulta de entrantes', summary: 'Frecuencia de lectura del inbox del GOIP.',
     detail: ['Controla cada cuántos milisegundos se consultan SMS entrantes. No afecta el envío de alertas.'], min: 1000,
