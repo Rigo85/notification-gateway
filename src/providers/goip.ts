@@ -178,6 +178,15 @@ export class GoipProvider implements ChannelProvider {
         error: err instanceof Error ? err.message : String(err),
       };
     }
+    // El firmware borra el smskey cuando termina algunos envíos. Si además reporta
+    // DONE, ya no hay forma de asociar ese slot al envío original ni de reintentarlo
+    // sin arriesgar un duplicado.
+    if (status.status1 === 'DONE' && !status.smskey1) {
+      return {
+        outcome: 'unresolved', providerId, countsAsAttempt: false,
+        error: 'GOIP terminó sin conservar el smskey; resultado final desconocido', response: status,
+      };
+    }
     if (status.smskey1 !== providerId) {
       return {
         outcome: 'uncertain', providerId, countsAsAttempt: false, retryAfterMs: 10_000,

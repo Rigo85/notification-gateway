@@ -125,6 +125,22 @@ describe('GoipProvider.send', () => {
     expect(sends).toBe(0);
   });
 
+  it('con DONE y smskey vacío conserva resultado desconocido sin reconciliar otro envío', async () => {
+    const p = provider(() => statusXml('', 'DONE'));
+    const result = await p.reconcile('perdido1');
+    expect(result).toMatchObject({
+      outcome: 'unresolved', providerId: 'perdido1', countsAsAttempt: false,
+    });
+  });
+
+  it('con smskey diferente mantiene la incertidumbre y no lo da por terminado', async () => {
+    const p = provider(() => statusXml('otro-envio', 'DONE'));
+    const result = await p.reconcile('esperado');
+    expect(result).toMatchObject({
+      outcome: 'uncertain', providerId: 'esperado', countsAsAttempt: false,
+    });
+  });
+
   it('cancela el polling de estado al apagar el worker', async () => {
     const p = new GoipProvider(
       CFG,

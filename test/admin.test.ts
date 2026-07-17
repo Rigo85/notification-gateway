@@ -106,7 +106,7 @@ describe('overview y listado', () => {
     expect(sent.json().notifications).toHaveLength(0);
   });
 
-  it('listado resume uncertain como pendiente y expired como fallido', async () => {
+  it('listado resume uncertain como pendiente, unresolved separado y expired como fallido', async () => {
     const first = await ctx.app.inject({
       method: 'POST', url: '/api/notifications', headers: authHeaders(ctx),
       payload: { recipients: ['+51987654321'], message: 'incierta' },
@@ -115,14 +115,21 @@ describe('overview y listado', () => {
       method: 'POST', url: '/api/notifications', headers: authHeaders(ctx),
       payload: { recipients: ['+51987654322'], message: 'expirada' },
     });
+    const third = await ctx.app.inject({
+      method: 'POST', url: '/api/notifications', headers: authHeaders(ctx),
+      payload: { recipients: ['+51987654323'], message: 'desconocida' },
+    });
     await ctx.db.query(`UPDATE deliveries SET status = 'uncertain' WHERE notification_id = $1`, [first.json().notification_id]);
     await ctx.db.query(`UPDATE deliveries SET status = 'expired' WHERE notification_id = $1`, [second.json().notification_id]);
+    await ctx.db.query(`UPDATE deliveries SET status = 'unresolved' WHERE notification_id = $1`, [third.json().notification_id]);
 
     const res = await ctx.app.inject({ method: 'GET', url: '/admin/api/notifications', headers: withSession() });
     const uncertain = res.json().notifications.find((item: { message: string }) => item.message === 'incierta');
     const expired = res.json().notifications.find((item: { message: string }) => item.message === 'expirada');
+    const unresolved = res.json().notifications.find((item: { message: string }) => item.message === 'desconocida');
     expect(uncertain).toMatchObject({ pending: '1', failed: '0' });
     expect(expired).toMatchObject({ pending: '0', failed: '1' });
+    expect(unresolved).toMatchObject({ pending: '0', unresolved: '1', failed: '0' });
   });
 });
 
@@ -385,7 +392,7 @@ describe('API keys y settings', () => {
     expect(blocked.json().reasons).toContain('queue_limit:reserved');
   });
 
-  it('resuelve uncertain manualmente y retry de expired abre una ventana nueva', async () => {
+  it('resuelve uncertain o unresolved manualmente y retry de expired abre una ventana nueva', async () => {
     const created = await ctx.app.inject({
       method: 'POST', url: '/admin/api/test-send', headers: withSession(),
       payload: { recipient: '+51987654321', message: 'incierta' },
@@ -403,6 +410,12 @@ describe('API keys y settings', () => {
       payload: { status: 'failed' },
     });
     expect(resolved.statusCode).toBe(200);
+    await ctx.db.query(`UPDATE deliveries SET status = 'unresolved' WHERE id = $1`, [id]);
+    const resolvedUnresolved = await ctx.app.inject({
+      method: 'POST', url: `/admin/api/deliveries/${id}/resolve-uncertain`, headers: withSession(),
+      payload: { status: 'sent' },
+    });
+    expect(resolvedUnresolved.statusCode).toBe(200);
     await ctx.db.query(`UPDATE deliveries SET status = 'expired' WHERE id = $1`, [id]);
     const retried = await ctx.app.inject({
       method: 'POST', url: `/admin/api/deliveries/${id}/retry`, headers: withSession(),

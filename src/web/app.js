@@ -85,6 +85,7 @@ function summaryBadges(n) {
   let html = '';
   if (Number(n.sent)) html += `<span class="badge sent">${n.sent} ✓</span>`;
   if (Number(n.pending)) html += `<span class="badge pending">${n.pending} ⏳</span>`;
+  if (Number(n.unresolved)) html += `<span class="badge unresolved">${n.unresolved} ?</span>`;
   if (Number(n.failed)) html += `<span class="badge failed">${n.failed} ✗</span>`;
   if (Number(n.suppressed)) html += `<span class="badge suppressed">${n.suppressed} ⊘</span>`;
   if (Number(n.suppressed_count)) html += `<span class="badge suppressed">×${Number(n.suppressed_count) + 1}</span>`;
@@ -104,7 +105,8 @@ async function loadDashboard() {
     counterCard('Más antigua lista', fmtDuration(queue.oldestReadyS), queueClass) +
     counterCard('Vaciado estimado', fmtDuration(queue.estimatedDrainS), queueClass) +
     counterCard('Fallidos (24 h)', failed, failed ? 'err' : '') +
-    counterCard('Inciertos (24 h)', s.uncertain ?? 0, s.uncertain ? 'err' : '') +
+    counterCard('Inciertos bloqueantes (24 h)', s.uncertain ?? 0, s.uncertain ? 'err' : '') +
+    counterCard('Resultado desconocido (24 h)', s.unresolved ?? 0, s.unresolved ? 'warn' : '') +
     counterCard('Suprimidos (24 h)', s.suppressed ?? 0);
   const providerCards = Object.entries(data.providers).map(([ch, h]) => {
     const d = h.detail || {};
@@ -202,14 +204,14 @@ async function showDetail(id) {
     ${n.deliveries.map((d) => `
       <tr>
         <td>${esc(d.recipient)}</td><td>${d.part}/${d.parts}</td>
-        <td><span class="badge ${['sent','delivered'].includes(d.status) ? 'sent' : ['failed','exhausted','expired'].includes(d.status) ? 'failed' : ['queued','retrying','processing'].includes(d.status) ? 'pending' : d.status === 'uncertain' ? 'failed' : 'suppressed'}">${d.status}</span></td>
+        <td><span class="badge ${['sent','delivered'].includes(d.status) ? 'sent' : ['failed','exhausted','expired'].includes(d.status) ? 'failed' : ['queued','retrying','processing'].includes(d.status) ? 'pending' : d.status === 'uncertain' ? 'failed' : d.status === 'unresolved' ? 'unresolved' : 'suppressed'}">${d.status}</span></td>
         <td>${d.attempts}</td>
         <td class="msg" title="${esc(d.last_error ?? '')}">${esc(d.last_error ?? '—')}</td>
         <td>${fmtDate(d.sent_at)}</td>
         <td class="actions">
           ${['failed','exhausted','expired','cancelled','suppressed'].includes(d.status) ? `<button data-act="retry" data-id="${d.id}">Reintentar</button>` : ''}
           ${['queued','retrying'].includes(d.status) ? `<button data-act="cancel" data-id="${d.id}" class="ghost">Cancelar</button>` : ''}
-          ${d.status === 'uncertain' ? `<button data-act="resolve-uncertain" data-status="sent" data-id="${d.id}">Marcar enviado</button><button data-act="resolve-uncertain" data-status="failed" data-id="${d.id}" class="ghost">Marcar fallido</button>` : ''}
+          ${['uncertain','unresolved'].includes(d.status) ? `<button data-act="resolve-uncertain" data-status="sent" data-id="${d.id}">Marcar enviado</button><button data-act="resolve-uncertain" data-status="failed" data-id="${d.id}" class="ghost">Marcar fallido</button>` : ''}
         </td>
       </tr>`).join('')}
     </tbody></table>`;
@@ -217,7 +219,7 @@ async function showDetail(id) {
     e.stopPropagation();
     if (btn.dataset.act === 'resolve-uncertain') {
       const label = btn.dataset.status === 'sent' ? 'enviado' : 'fallido';
-      if (!confirm(`¿Marcar este resultado incierto como ${label}? Esta acción libera el canal SMS.`)) return;
+      if (!confirm(`¿Marcar este resultado desconocido como ${label}? La evidencia original se conservará.`)) return;
     }
     try {
       await api(`/deliveries/${btn.dataset.id}/${btn.dataset.act}`, {

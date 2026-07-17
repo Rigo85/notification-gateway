@@ -11,7 +11,9 @@ export type SendOutcome =
   | 'unavailable'
   | 'temporary'
   | 'permanent'
-  | 'uncertain';
+  | 'uncertain'
+  /** Resultado final no verificable; se conserva y nunca se reintenta automáticamente. */
+  | 'unresolved';
 
 export interface SendResult {
   outcome: SendOutcome;

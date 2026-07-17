@@ -651,6 +651,37 @@ describe('reintentos y fallos', () => {
     expect(second.statusCode).toBe(202);
   });
 
+  it('DONE sin smskey queda unresolved, conserva evidencia y deja avanzar la cola sin reenvío', async () => {
+    ctx.fake.behavior = {
+      onSend: (job) => job.payload === 'resultado perdido'
+        ? { outcome: 'uncertain', countsAsAttempt: true, providerId: 'lost-key', retryAfterMs: 1 }
+        : { outcome: 'sent', countsAsAttempt: true, providerId: 'second-ok' },
+      onReconcile: (providerId) => ({
+        outcome: 'unresolved', countsAsAttempt: false, providerId,
+        error: 'GOIP terminó sin smskey', response: { status1: 'DONE', smskey1: '' },
+      }),
+    };
+    const first = await post({ recipients: ['+51987654321'], message: 'resultado perdido' });
+    const second = await post({ recipients: ['+51987654321'], message: 'siguiente' });
+
+    await worker.runOnce('sms');
+    await ctx.db.query(`UPDATE deliveries SET next_retry_at = now() WHERE notification_id = $1`, [first.json().notification_id]);
+    await worker.runOnce('sms');
+    await worker.runOnce('sms');
+
+    const { rows } = await ctx.db.query(
+      `SELECT n.message, d.status, d.attempts, d.provider_id, d.provider_response
+       FROM deliveries d JOIN notifications n ON n.id = d.notification_id ORDER BY n.created_at`,
+    );
+    expect(rows[0]).toMatchObject({
+      message: 'resultado perdido', status: 'unresolved', attempts: 1, provider_id: 'lost-key',
+      provider_response: { status1: 'DONE', smskey1: '' },
+    });
+    expect(rows[1]).toMatchObject({ message: 'siguiente', status: 'sent', attempts: 1 });
+    expect(ctx.fake.sentJobs.map((job) => job.payload)).toEqual(['siguiente']);
+    expect(second.statusCode).toBe(202);
+  });
+
   it('uncertain sin smskey se reintenta una vez y luego no bloquea el canal', async () => {
     let firstAttempts = 0;
     ctx.fake.behavior = {

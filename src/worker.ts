@@ -25,7 +25,7 @@ interface Logger {
 const STALE_LOCK_MINUTES = 5;
 const SEND_TIMEOUT_MS = 90_000;
 
-/** Worker estrictamente serial por canal; un uncertain pausa su canal. */
+/** Worker estrictamente serial por canal; un uncertain pausado protege de duplicados. */
 export class Worker {
   private db: Db;
   private providers: Map<string, ChannelProvider>;
@@ -231,6 +231,10 @@ export class Worker {
       );
       return true;
     }
+    if (result.outcome === 'unresolved') {
+      await this.finishUnresolved(delivery.id, result);
+      return true;
+    }
     return this.applySendResult(delivery, { ...result, countsAsAttempt: false }, delivery.attempts, settings);
   }
 
@@ -323,6 +327,23 @@ export class Worker {
       [id, error],
     );
     this.log.warn({ deliveryId: id, error }, 'delivery conservada sin reintento por antigüedad');
+    this.events?.emit('change');
+  }
+
+  /**
+   * Resultado terminal que el GOIP ya no permite asociar con certeza al smskey.
+   * Se conserva toda la evidencia, no bloquea el canal y nunca se reintenta solo.
+   */
+  private async finishUnresolved(id: string, result: SendResult): Promise<void> {
+    await this.db.query(
+      `UPDATE deliveries SET status = 'unresolved', finished_at = now(), locked_at = NULL,
+         last_reconciled_at = now(),
+         provider_response = COALESCE(provider_response, '{}'::jsonb) || COALESCE($2::jsonb, '{}'::jsonb),
+         last_error = $3
+       WHERE id = $1 AND status = 'uncertain'`,
+      [id, jsonb(result.response), result.error ?? 'resultado final desconocido'],
+    );
+    this.log.warn({ deliveryId: id }, 'delivery con resultado desconocido; no se reintentará automáticamente');
     this.events?.emit('change');
   }
 

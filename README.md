@@ -44,14 +44,16 @@ curl -X POST localhost:8090/api/notifications \
 Endpoints: `POST /api/notifications`, `GET /api/notifications/:id`, `GET /health`.
 
 Estados de una delivery: `queued → processing → sent` con
-`retrying/exhausted/failed/suppressed/cancelled/expired/uncertain` según el caso. Los
+`retrying/exhausted/failed/suppressed/cancelled/expired/uncertain/unresolved` según el caso. Los
 reintentos automáticos se permiten durante una hora desde la primera evaluación del
 worker; después la delivery queda `expired`, sin borrar su contenido. Un reintento manual
 abre una ventana nueva.
 
 Si el GOIP acepta un envío pero no se puede confirmar su resultado, la delivery queda
 `uncertain` y pausa el canal SMS. Con `smskey`, el worker consulta el GOIP hasta obtener
-`DONE`. Sin `smskey`, espera 60 segundos y hace un único reintento: puede duplicar el SMS,
+`DONE`. Si el GOIP termina (`DONE`) pero ya borró el `smskey`, queda `unresolved`: conserva
+la evidencia, no se reintenta automáticamente y no bloquea el canal; el panel permite dejar
+constancia manual de enviado o fallido. Sin `smskey`, espera 60 segundos y hace un único reintento: puede duplicar el SMS,
 pero evita que una respuesta perdida congele el canal. Si ese reintento también queda
 incierto, la delivery se conserva para resolución manual y las posteriores continúan.
 `L1 busy`, GSM desregistrado y health degradado no consumen intentos.

@@ -110,6 +110,7 @@ export function registerAdminRoutes(
               count(d.id) AS deliveries,
               count(d.id) FILTER (WHERE d.status = 'sent') AS sent,
               count(d.id) FILTER (WHERE d.status IN ('queued','retrying','processing','uncertain')) AS pending,
+              count(d.id) FILTER (WHERE d.status = 'unresolved') AS unresolved,
               count(d.id) FILTER (WHERE d.status IN ('failed','exhausted','expired')) AS failed
        FROM notifications n LEFT JOIN deliveries d ON d.notification_id = n.id
        GROUP BY n.id ORDER BY n.created_at DESC LIMIT 20`,
@@ -160,6 +161,7 @@ export function registerAdminRoutes(
               count(d.id) AS deliveries,
               count(d.id) FILTER (WHERE d.status = 'sent') AS sent,
               count(d.id) FILTER (WHERE d.status IN ('queued','retrying','processing','uncertain')) AS pending,
+              count(d.id) FILTER (WHERE d.status = 'unresolved') AS unresolved,
               count(d.id) FILTER (WHERE d.status IN ('failed','exhausted','expired')) AS failed,
               count(d.id) FILTER (WHERE d.status = 'suppressed') AS suppressed
        FROM notifications n LEFT JOIN deliveries d ON d.notification_id = n.id
@@ -221,12 +223,15 @@ export function registerAdminRoutes(
         `UPDATE deliveries SET status = $2, locked_at = NULL, finished_at = now(),
            sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END,
            last_reconciled_at = now(),
+           provider_response = COALESCE(provider_response, '{}'::jsonb) ||
+             jsonb_build_object('manual_resolution', jsonb_build_object('status', $2, 'at', now())),
            last_error = CASE WHEN $2 = 'failed'
-             THEN 'resultado incierto resuelto manualmente como fallido' ELSE NULL END
-         WHERE id = $1 AND status = 'uncertain' RETURNING id`,
+             THEN COALESCE(last_error || '; ', '') || 'resultado desconocido resuelto manualmente como fallido'
+             ELSE last_error END
+         WHERE id = $1 AND status IN ('uncertain', 'unresolved') RETURNING id`,
         [req.params.id, req.body.status],
       );
-      if (!rows[0]) return reply.code(409).send({ error: 'Solo se resuelven deliveries uncertain' });
+      if (!rows[0]) return reply.code(409).send({ error: 'Solo se resuelven deliveries uncertain o unresolved' });
       opts.events.emit('change');
       return { ok: true, status: req.body.status };
     },

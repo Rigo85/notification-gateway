@@ -69,7 +69,7 @@ td.msg { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow:
 .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
   background: var(--chip); color: var(--muted); margin-right: 4px; }
 .badge.sent { color: var(--ok); } .badge.pending { color: var(--warn); }
-.badge.failed { color: var(--err); } .badge.suppressed { color: var(--muted); }
+.badge.failed { color: var(--err); } .badge.unresolved { color: var(--warn); } .badge.suppressed { color: var(--muted); }
 .badge.prio-critical { color: var(--err); font-weight: 600; }
 .badge.prio-high { color: var(--warn); }
 
