@@ -205,13 +205,18 @@ function sendAdmissionRejection(
   extra: Record<string, unknown>,
 ): unknown {
   const critical = priority === 'critical';
+  // A rate limit is recoverable, but the caller must stop sending long enough for
+  // the rolling window to drain. A fixed full window is conservative and avoids
+  // clients keeping the limit permanently saturated with short retries.
+  const rateLimited = reasons.some((reason) => reason.startsWith('rate_limit:'));
   const response = reply.code(critical ? 503 : 429);
   if (critical) response.header('retry-after', '60');
+  else if (rateLimited) response.header('retry-after', '3600');
   return response.send({
     notification_id: notificationId,
     status: 'suppressed',
     reasons,
-    retryable: critical,
+    retryable: critical || rateLimited,
     ...extra,
   });
 }

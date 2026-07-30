@@ -182,6 +182,8 @@ describe('límites', () => {
     await post({ recipients: ['+51911111111'], message: 'primera' });
     const res = await post({ recipients: ['+51922222222'], message: 'segunda' });
     expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBe('3600');
+    expect(res.json().retryable).toBe(true);
     const { rows } = await ctx.db.query(
       `SELECT last_error FROM deliveries WHERE notification_id = $1`,
       [res.json().notification_id],
