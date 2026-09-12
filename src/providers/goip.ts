@@ -50,6 +50,7 @@ const defaultHttpGet: HttpGet = (url, authHeader, timeoutMs, signal) =>
 const STATUS_POLL_MS = 2000;
 const STATUS_TIMEOUT_MS = 60_000;
 const HTTP_TIMEOUT_MS = 15_000;
+const HEALTH_CACHE_MS = 5_000;
 
 interface GoipTimings {
   statusPollMs: number;
@@ -64,6 +65,9 @@ export class GoipProvider implements ChannelProvider {
   private authHeader: string;
   private httpGet: HttpGet;
   private timings: GoipTimings;
+  private operationTail: Promise<void> = Promise.resolve();
+  private healthCache: { at: number; value: HealthStatus } | null = null;
+  private deviceUptime: { seconds: number; observedAt: number; bootAt: number } | null = null;
 
   constructor(
     cfg: GoipConfig,
@@ -84,6 +88,10 @@ export class GoipProvider implements ChannelProvider {
   }
 
   async send(job: DeliveryJob, onAccepted?: AcceptedCallback, signal?: AbortSignal): Promise<SendResult> {
+    return this.serialized(() => this.sendUnlocked(job, onAccepted, signal), signal);
+  }
+
+  private async sendUnlocked(job: DeliveryJob, onAccepted?: AcceptedCallback, signal?: AbortSignal): Promise<SendResult> {
     // Quirk del firmware (verificado 2026-07-12): un mensaje que EMPIEZA con '['
     // falla siempre con error 500; con '[' en medio del texto funciona.
     const payload = job.payload.startsWith('[') ? `.${job.payload}` : job.payload;
@@ -169,6 +177,10 @@ export class GoipProvider implements ChannelProvider {
   }
 
   async reconcile(providerId: string, signal?: AbortSignal): Promise<SendResult> {
+    return this.serialized(() => this.reconcileUnlocked(providerId, signal), signal);
+  }
+
+  private async reconcileUnlocked(providerId: string, signal?: AbortSignal): Promise<SendResult> {
     let status: Record<string, string>;
     try {
       status = await this.fetchSendStatus(signal);
@@ -203,6 +215,29 @@ export class GoipProvider implements ChannelProvider {
   }
 
   async health(signal?: AbortSignal): Promise<HealthStatus> {
+    if (this.healthCache && Date.now() - this.healthCache.at < HEALTH_CACHE_MS) {
+      return this.withRuntimeDetail(this.healthCache.value, true);
+    }
+    return this.serialized(async () => {
+      if (this.healthCache && Date.now() - this.healthCache.at < HEALTH_CACHE_MS) {
+        return this.withRuntimeDetail(this.healthCache.value, true);
+      }
+      const value = await this.healthUnlocked(signal);
+      this.healthCache = { at: Date.now(), value };
+      return this.withRuntimeDetail(value, false);
+    }, signal);
+  }
+
+  runtimeState(): Record<string, unknown> {
+    if (!this.deviceUptime) return {};
+    return {
+      device_uptime_s: this.deviceUptime.seconds,
+      device_uptime_observed_at: new Date(this.deviceUptime.observedAt).toISOString(),
+      device_boot_at: new Date(this.deviceUptime.bootAt).toISOString(),
+    };
+  }
+
+  private async healthUnlocked(signal?: AbortSignal): Promise<HealthStatus> {
     try {
       const xml = await this.httpText(`${this.cfg.baseUrl}/default/en_US/status.xml`, signal);
       const gsmUp = stripTags(tag(xml, 'l1_gsm_status')) === 'Y';
@@ -232,10 +267,15 @@ export class GoipProvider implements ChannelProvider {
    * Lectura pura; la dedup la hace el poller con hash persistente.
    */
   async fetchInbox(signal?: AbortSignal): Promise<InboundSms[]> {
+    return this.serialized(() => this.fetchInboxUnlocked(signal), signal);
+  }
+
+  private async fetchInboxUnlocked(signal?: AbortSignal): Promise<InboundSms[]> {
     const html = await this.httpText(
       `${this.cfg.baseUrl}/default/en_US/tools.html?type=sms_inbox&line=1&pos=-1`,
       signal,
     );
+    this.observeUptime(html);
     const literal = extractJsonArrayAssignment(html, 'sms');
     if (!literal) return [];
     let entries: unknown;
@@ -258,6 +298,35 @@ export class GoipProvider implements ChannelProvider {
       });
     }
     return result;
+  }
+
+  private observeUptime(html: string): void {
+    const raw = html.match(/\bvar\s+uptime_s\s*=\s*["']([0-9.]+)["']/)?.[1];
+    const seconds = Number(raw);
+    if (!Number.isFinite(seconds) || seconds < 0) return;
+    const observedAt = Date.now();
+    this.deviceUptime = { seconds, observedAt, bootAt: observedAt - seconds * 1000 };
+  }
+
+  private withRuntimeDetail(value: HealthStatus, cached: boolean): HealthStatus {
+    return {
+      ...value,
+      detail: { ...value.detail, ...this.runtimeState(), cached },
+    };
+  }
+
+  private async serialized<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.operationTail;
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.operationTail = previous.then(() => current);
+    try {
+      await waitFor(previous, signal);
+      if (signal?.aborted) throw signal.reason ?? new Error('operación abortada');
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private async fetchSendStatus(signal?: AbortSignal): Promise<Record<string, string>> {
@@ -336,5 +405,21 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       resolve();
     }, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function waitFor(promise: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('operación abortada'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(signal.reason ?? new Error('operación abortada'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, reject);
   });
 }

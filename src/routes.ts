@@ -49,7 +49,7 @@ export function registerRoutes(
     }
     for (const [channel, provider] of providers) {
       try {
-        const h = await withTimeout(provider.health(), 3000);
+        const h = await withTimeout((signal) => provider.health(signal), 3000);
         checks[`provider_${channel}`] = h.ok ? { ok: true, ...h.detail } : { ok: false, ...h.detail };
         if (!h.ok) ok = false;
       } catch (err) {
@@ -67,11 +67,38 @@ export function registerRoutes(
         ready: queue.ready,
         oldest_pending_s: queue.oldestPendingS,
         oldest_ready_s: queue.oldestReadyS,
+        blocking_uncertain: queue.blockingUncertain,
+        blocking_oldest_s: queue.blockingOldestS,
         estimated_drain_s: queue.estimatedDrainS,
         normal_limit: settings.queue_normal_limit,
         absolute_limit: settings.queue_normal_limit + settings.queue_critical_reserve,
       };
       if (queueState === 'critical_only' || queueState === 'full') ok = false;
+      const { rows: workerRows } = await db.query<{
+        last_success_at: Date | null;
+        last_error_at: Date | null;
+        last_error: string | null;
+        detail: Record<string, unknown>;
+        reference_age_s: string;
+      }>(
+        `SELECT last_success_at, last_error_at, last_error, detail,
+                extract(epoch FROM now() - COALESCE(last_success_at, updated_at))::int::text AS reference_age_s
+         FROM service_health WHERE component = 'sms_worker'`,
+      );
+      const smsWorker = workerRows[0];
+      const workerAgeS = Number(smsWorker?.reference_age_s ?? 0);
+      const workerState = typeof smsWorker?.detail?.state === 'string' ? smsWorker.detail.state : 'starting';
+      const workerStale = Boolean(smsWorker && workerAgeS > 120);
+      const workerFailed = workerStale || ['error', 'stopped'].includes(workerState);
+      checks.sms_worker = {
+        state: workerStale ? 'stale' : workerState,
+        last_success_at: smsWorker?.last_success_at ?? null,
+        last_error_at: smsWorker?.last_error_at ?? null,
+        last_error: smsWorker?.last_error ?? null,
+        age_s: smsWorker ? workerAgeS : null,
+        detail: smsWorker?.detail ?? {},
+      };
+      if (!smsWorker || workerFailed) ok = false;
       const { rows: inboundRows } = await db.query<{
         last_success_at: Date | null;
         last_error_at: Date | null;
@@ -205,10 +232,11 @@ function sendAdmissionRejection(
   extra: Record<string, unknown>,
 ): unknown {
   const critical = priority === 'critical';
-  // A rate limit is recoverable, but the caller must stop sending long enough for
-  // the rolling window to drain. A fixed full window is conservative and avoids
-  // clients keeping the limit permanently saturated with short retries.
+  // Rate and queue limits are recoverable. Rate limits expose the full rolling
+  // window; queue limits intentionally leave retry pacing to the caller because
+  // their drain time depends on the provider and the blocking delivery.
   const rateLimited = reasons.some((reason) => reason.startsWith('rate_limit:'));
+  const queueLimited = reasons.some((reason) => reason.startsWith('queue_limit:'));
   const response = reply.code(critical ? 503 : 429);
   if (critical) response.header('retry-after', '60');
   else if (rateLimited) response.header('retry-after', '3600');
@@ -216,7 +244,7 @@ function sendAdmissionRejection(
     notification_id: notificationId,
     status: 'suppressed',
     reasons,
-    retryable: critical || rateLimited,
+    retryable: critical || rateLimited || queueLimited,
     ...extra,
   });
 }
@@ -228,13 +256,18 @@ function logRateLimitEvents(
   for (const rateLimit of rateLimitEvents) log.warn({ rateLimit }, 'umbral de rate limit alcanzado');
 }
 
-async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error('timeout')), ms);
+    timer = setTimeout(() => {
+      const error = new Error('timeout');
+      controller.abort(error);
+      reject(error);
+    }, ms);
   });
   try {
-    return await Promise.race([p, timeout]);
+    return await Promise.race([operation(controller.signal), timeout]);
   } finally {
     clearTimeout(timer!);
   }

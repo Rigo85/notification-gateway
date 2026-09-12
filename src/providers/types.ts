@@ -45,6 +45,8 @@ export interface ChannelProvider {
   /** Reconsulta un envio previamente aceptado sin volver a enviarlo. */
   reconcile?(providerId: string, signal?: AbortSignal): Promise<SendResult>;
   health(signal?: AbortSignal): Promise<HealthStatus>;
+  /** Evidencia local ya observada; no debe iniciar una consulta al dispositivo. */
+  runtimeState?(): Record<string, unknown>;
   /** lee los mensajes entrantes visibles (sin consumirlos del equipo) */
   fetchInbox?(signal?: AbortSignal): Promise<InboundSms[]>;
   /** Tamaño máximo de la ventana visible; no implica ocupación ni saturación. */

@@ -19,6 +19,7 @@ export interface Settings {
   retry_window_s: number;
   unavailable_retry_s: number;
   uncertain_poll_s: number;
+  uncertain_max_block_s: number;
   uncertain_without_smskey_retry_s: number;
   inbound_poll_ms: number;
 }
@@ -42,6 +43,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   retry_window_s: 3600,
   unavailable_retry_s: 30,
   uncertain_poll_s: 10,
+  uncertain_max_block_s: 300,
   uncertain_without_smskey_retry_s: 60,
   inbound_poll_ms: 10_000,
 };
@@ -85,6 +87,7 @@ export function validateSettings(settings: Record<string, unknown>): string | nu
     retry_window_s: [60, 604_800],
     unavailable_retry_s: [1, 3_600],
     uncertain_poll_s: [1, 300],
+    uncertain_max_block_s: [60, 3_600],
     uncertain_without_smskey_retry_s: [10, 3_600],
     inbound_poll_ms: [1_000, 300_000],
   };

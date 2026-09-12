@@ -362,7 +362,7 @@ describe('guarda de cola', () => {
     expect((await post({ recipients: ['+51987654321'], message: 'normal 1' })).statusCode).toBe(202);
     const blocked = await post({ recipients: ['+51987654321'], message: 'normal 2' });
     expect(blocked.statusCode).toBe(429);
-    expect(blocked.json()).toMatchObject({ status: 'suppressed', retryable: false });
+    expect(blocked.json()).toMatchObject({ status: 'suppressed', retryable: true });
     expect(blocked.json().reasons).toContain('queue_limit:reserved');
 
     const critical = await post({
@@ -432,6 +432,7 @@ describe('guarda de cola', () => {
     );
     const normal = await post({ recipients: ['+51987654321'], message: 'normal nueva' });
     expect(normal.statusCode).toBe(429);
+    expect(normal.json().retryable).toBe(true);
     expect(normal.json().reasons).toContain('queue_limit:age');
     const critical = await post({
       recipients: ['+51987654321'], message: 'critical nueva', priority: 'critical',
@@ -708,13 +709,126 @@ describe('reintentos y fallos', () => {
       `SELECT n.message, d.status, d.attempts, d.provider_response
        FROM deliveries d JOIN notifications n ON n.id = d.notification_id ORDER BY n.created_at`,
     );
-    expect(rows[0]).toMatchObject({ message: 'sin smskey', status: 'uncertain', attempts: 2 });
+    expect(rows[0]).toMatchObject({ message: 'sin smskey', status: 'unresolved', attempts: 2 });
     expect(rows[0].provider_response).toMatchObject({ uncertain_without_smskey_first_error: 'respuesta perdida' });
     expect(rows[1]).toMatchObject({ message: 'continúa cola', status: 'sent', attempts: 1 });
     expect(firstAttempts).toBe(2);
     expect(await worker.runOnce('sms')).toBe(false);
     expect(firstAttempts).toBe(2);
     expect(second.statusCode).toBe(202);
+  });
+
+  it('libera a los 5 minutos un smskey sin estado final, preserva evidencia y no lo reenvía', async () => {
+    ctx.fake.behavior = {
+      onSend: (job) => job.payload === 'bloqueante'
+        ? {
+            outcome: 'uncertain', countsAsAttempt: true, providerId: 'stuck-key', retryAfterMs: 1,
+            error: 'sin estado final', response: { phase: 'send' },
+          }
+        : { outcome: 'sent', countsAsAttempt: true, providerId: 'next-ok' },
+      onReconcile: (providerId) => ({
+        outcome: 'uncertain', countsAsAttempt: false, providerId, retryAfterMs: 1,
+        error: 'sigue STARTED', response: { phase: 'reconcile' },
+      }),
+    };
+    const first = await post({ recipients: ['+51987654321'], message: 'bloqueante' });
+    const second = await post({ recipients: ['+51987654321'], message: 'siguiente al bloqueo' });
+
+    await worker.runOnce('sms');
+    await ctx.db.query(
+      `UPDATE deliveries SET next_retry_at = now(), submitted_at = now() - interval '4 minutes'
+       WHERE notification_id = $1`,
+      [first.json().notification_id],
+    );
+    await worker.runOnce('sms');
+    let { rows } = await ctx.db.query(
+      `SELECT status, reconcile_count, first_uncertain_error, first_uncertain_response, provider_response
+       FROM deliveries WHERE notification_id = $1`,
+      [first.json().notification_id],
+    );
+    expect(rows[0]).toMatchObject({
+      status: 'uncertain', reconcile_count: 1, first_uncertain_error: 'sin estado final',
+      first_uncertain_response: { phase: 'send' }, provider_response: { phase: 'reconcile' },
+    });
+
+    await ctx.db.query(
+      `UPDATE deliveries SET next_retry_at = now(), submitted_at = now() - interval '301 seconds'
+       WHERE notification_id = $1`,
+      [first.json().notification_id],
+    );
+    await worker.runOnce('sms');
+    ctx.fake.behavior = {};
+    await worker.runOnce('sms');
+    ({ rows } = await ctx.db.query(
+      `SELECT n.message, d.status, d.attempts, d.first_uncertain_response, d.provider_response, d.last_error
+       FROM deliveries d JOIN notifications n ON n.id = d.notification_id ORDER BY n.created_at`,
+    ));
+    expect(rows[0]).toMatchObject({
+      message: 'bloqueante', status: 'unresolved', attempts: 1,
+      first_uncertain_response: { phase: 'send' }, provider_response: { timeout_s: 300 },
+    });
+    expect(rows[0].last_error).toContain('bloqueo máximo de 300s');
+    expect(rows[1]).toMatchObject({ message: 'siguiente al bloqueo', status: 'sent', attempts: 1 });
+    expect(ctx.fake.sentJobs.map((job) => job.payload)).toEqual(['siguiente al bloqueo']);
+    expect(second.statusCode).toBe(202);
+  });
+
+  it('un reinicio observado del GOIP libera inmediatamente el smskey anterior', async () => {
+    ctx.fake.behavior = {
+      onSend: () => ({ outcome: 'uncertain', countsAsAttempt: true, providerId: 'before-reboot', retryAfterMs: 1 }),
+    };
+    const res = await post({ recipients: ['+51987654321'], message: 'antes del reinicio' });
+    await worker.runOnce('sms');
+    const submitted = await ctx.db.query<{ submitted_at: Date }>(
+      `SELECT submitted_at FROM deliveries WHERE notification_id = $1`, [res.json().notification_id],
+    );
+    ctx.fake.behavior.runtimeState = {
+      device_boot_at: new Date(submitted.rows[0]!.submitted_at.getTime() + 3_000).toISOString(),
+    };
+    await worker.runOnce('sms');
+    const { rows } = await ctx.db.query(
+      `SELECT status, attempts, last_error FROM deliveries WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    expect(rows[0]).toMatchObject({ status: 'unresolved', attempts: 1 });
+    expect(rows[0].last_error).toContain('reinició después de aceptar');
+  });
+
+  it('genera una sola alerta crítica al liberar el bloqueo y no crea alertas recursivas', async () => {
+    const local = new Worker(ctx.db, ctx.providers, silentLog, undefined, ['+51900000001']);
+    ctx.fake.behavior = {
+      onSend: () => ({ outcome: 'uncertain', countsAsAttempt: true, providerId: 'stuck-alert', retryAfterMs: 1 }),
+    };
+    const res = await post({
+      recipients: ['+51987654321'], message: 'genera alerta', dedup_key: 'incident:original',
+    });
+    await local.runOnce('sms');
+    await ctx.db.query(
+      `UPDATE deliveries SET submitted_at = now() - interval '301 seconds' WHERE notification_id = $1`,
+      [res.json().notification_id],
+    );
+    await local.runOnce('sms');
+    const alerts = await ctx.db.query(
+      `SELECT n.priority, n.dedup_key, d.recipient, d.status
+       FROM notifications n JOIN deliveries d ON d.notification_id = n.id
+       WHERE n.dedup_key LIKE 'system-sms-recovery:%'`,
+    );
+    expect(alerts.rows).toHaveLength(1);
+    expect(alerts.rows[0]).toMatchObject({ priority: 'critical', recipient: '+51900000001', status: 'queued' });
+
+    ctx.fake.behavior = {
+      onSend: () => ({ outcome: 'uncertain', countsAsAttempt: true, providerId: 'stuck-recovery', retryAfterMs: 1 }),
+    };
+    await local.runOnce('sms');
+    await ctx.db.query(
+      `UPDATE deliveries SET submitted_at = now() - interval '301 seconds'
+       WHERE notification_id = (SELECT id FROM notifications WHERE dedup_key LIKE 'system-sms-recovery:%')`,
+    );
+    await local.runOnce('sms');
+    const count = await ctx.db.query(
+      `SELECT count(*) AS n FROM notifications WHERE dedup_key LIKE 'system-sms-recovery:%'`,
+    );
+    expect(count.rows[0].n).toBe('1');
   });
 
   it('recupera deliveries con lock viejo', async () => {
@@ -737,6 +851,21 @@ describe('reintentos y fallos', () => {
       local.stop().then(() => 'stopped'),
       new Promise((resolve) => setTimeout(() => resolve('timeout'), 500)),
     ])).resolves.toBe('stopped');
+  });
+
+  it('un fallo transitorio de PostgreSQL no termina el loop del worker', async () => {
+    await setSetting(ctx.db, 'poll_ms', 250);
+    const query = vi.spyOn(ctx.db, 'query').mockRejectedValueOnce(new Error('db transitoria'));
+    const local = new Worker(ctx.db, ctx.providers, silentLog);
+    local.start();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    query.mockRestore();
+
+    const { rows } = await ctx.db.query(
+      `SELECT detail FROM service_health WHERE component = 'sms_worker'`,
+    );
+    expect(rows[0].detail).toMatchObject({ state: 'idle' });
+    await local.stop();
   });
 
   it('lock viejo ya aceptado pasa a uncertain y no se reenvía', async () => {
@@ -797,6 +926,32 @@ describe('consulta y health', () => {
     expect(body.checks.provider_sms.ok).toBe(true);
     expect(body.checks.queue.pending).toBe(1);
     expect(body.checks.queue).toMatchObject({ state: 'ok', ready: 1, absolute_limit: 80 });
+  });
+
+  it('GET /health muestra el bloqueo incierto sin confundirlo con un worker caído', async () => {
+    ctx.fake.behavior = {
+      onSend: () => ({ outcome: 'uncertain', countsAsAttempt: true, providerId: 'health-stuck', retryAfterMs: 10_000 }),
+    };
+    await post({ recipients: ['+51987654321'], message: 'estado worker' });
+    await worker.runOnce('sms');
+
+    const res = await ctx.app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(res.json().checks.sms_worker).toMatchObject({ state: 'blocked_uncertain' });
+    expect(res.json().checks.queue).toMatchObject({
+      state: 'warning', blocking_uncertain: 1, estimated_drain_s: null,
+    });
+  });
+
+  it('GET /health detecta un heartbeat obsoleto del worker', async () => {
+    await ctx.db.query(
+      `UPDATE service_health SET last_success_at = now() - interval '10 minutes',
+         detail = '{"state":"idle"}' WHERE component = 'sms_worker'`,
+    );
+    const res = await ctx.app.inject({ method: 'GET', url: '/health' });
+    expect(res.json().checks.sms_worker).toMatchObject({ state: 'stale' });
+    expect(res.json().ok).toBe(false);
   });
 
   it('GET /health se degrada cuando la cola queda solo para critical', async () => {

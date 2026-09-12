@@ -51,11 +51,13 @@ abre una ventana nueva.
 
 Si el GOIP acepta un envío pero no se puede confirmar su resultado, la delivery queda
 `uncertain` y pausa el canal SMS. Con `smskey`, el worker consulta el GOIP hasta obtener
-`DONE`. Si el GOIP termina (`DONE`) pero ya borró el `smskey`, queda `unresolved`: conserva
-la evidencia, no se reintenta automáticamente y no bloquea el canal; el panel permite dejar
-constancia manual de enviado o fallido. Sin `smskey`, espera 60 segundos y hace un único reintento: puede duplicar el SMS,
+`DONE`. El bloqueo tiene un máximo configurable de 300 segundos; al vencer, o si se detecta
+que el GOIP reinició después de aceptar el envío, queda `unresolved`: conserva la primera y
+la última evidencia, no se reintenta automáticamente, libera el canal y, si hay destinatarios
+administrativos configurados, encola una alerta crítica. El panel permite dejar constancia manual de
+enviado o fallido. Sin `smskey`, espera 60 segundos y hace un único reintento: puede duplicar el SMS,
 pero evita que una respuesta perdida congele el canal. Si ese reintento también queda
-incierto, la delivery se conserva para resolución manual y las posteriores continúan.
+incierto, pasa a `unresolved` y las posteriores continúan.
 `L1 busy`, GSM desregistrado y health degradado no consumen intentos.
 Protecciones: dedup por ventana (15 min), límites atómicos por hora (global /
 destinatario / API key), reserva crítica, alerta administrativa de corte y división
@@ -67,6 +69,9 @@ La admisión también vigila profundidad y antigüedad de la cola. Por defecto, 
 deliveries pendientes solo admite `critical`, reserva 20 posiciones adicionales y bloquea
 normales si la delivery lista más antigua supera 15 minutos. Un rechazo total normal
 responde `429`; un `critical` sin capacidad absoluta responde `503` con `Retry-After`.
+Los rechazos `queue_limit:*` se declaran recuperables para que los productores persistentes,
+como el digest de Atalaya, puedan diferir y reevaluar el envío. Esto no obliga a reintentar
+eventos efímeros que ya perdieron utilidad operacional.
 
 ## Panel /admin
 
@@ -76,7 +81,8 @@ salud del GOIP, envío de prueba), Notificaciones (filtros, detalle, reintentar/
 API Keys (crear/revocar) y Configuración (parámetros operativos en caliente).
 Se actualiza en vivo por SSE.
 
-El dashboard también muestra el estado del poller y la cantidad de entrantes visibles. Las
+El dashboard también muestra el heartbeat y estado operativo del worker SMS, el estado del
+poller y la cantidad de entrantes visibles. Las
 20 posiciones del GOIP son una ventana histórica rodante, no una cola ni una señal de
 saturación: un mensaje nuevo aparece arriba y puede desplazar al más antiguo. El health se
 degrada por ciclos fallidos u obsoletos, no por ver 20 entradas. La lectura no borra mensajes

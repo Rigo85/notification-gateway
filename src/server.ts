@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   });
   await migrate(db, (msg) => app.log.info(msg));
 
-  const worker = new Worker(db, providers, app.log, events);
+  const worker = new Worker(db, providers, app.log, events, config.systemAlertRecipients);
   const inbound = new InboundPoller(db, providers, app.log, events);
   let shuttingDown = false;
 

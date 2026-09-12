@@ -193,4 +193,31 @@ describe('GoipProvider.health', () => {
     const h = await p.health();
     expect(h.ok).toBe(false);
   });
+
+  it('serializa health y bandeja para no solapar peticiones al firmware', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const p = new GoipProvider(CFG, async (url) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active--;
+      return url.includes('status.xml')
+        ? '<status><l1_gsm_sim>Y</l1_gsm_sim><l1_gsm_status>Y</l1_gsm_status><l1_gsm_signal>20</l1_gsm_signal></status>'
+        : 'var uptime_s = "120"; sms= [];';
+    }, { statusPollMs: 1, statusTimeoutMs: 20, httpTimeoutMs: 20 });
+
+    await Promise.all([p.health(), p.fetchInbox(), p.health()]);
+    expect(maxActive).toBe(1);
+  });
+
+  it('obtiene el arranque estimado del uptime ya presente en la bandeja', async () => {
+    const before = Date.now();
+    const p = provider(() => 'var uptime_s = "120.5"; sms= [];');
+    await p.fetchInbox();
+    const state = p.runtimeState();
+    expect(state.device_uptime_s).toBe(120.5);
+    expect(new Date(state.device_boot_at as string).getTime()).toBeGreaterThanOrEqual(before - 121_000);
+    expect(new Date(state.device_boot_at as string).getTime()).toBeLessThanOrEqual(Date.now() - 120_000);
+  });
 });

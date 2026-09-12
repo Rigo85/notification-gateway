@@ -103,9 +103,13 @@ async function loadDashboard() {
     counterCard('Enviados (24 h)', s.sent ?? 0, 'ok') +
     counterCard('Cola SMS', `${queue.pendingTotal}/${queue.absoluteLimit}`, queueClass) +
     counterCard('Más antigua lista', fmtDuration(queue.oldestReadyS), queueClass) +
-    counterCard('Vaciado estimado', fmtDuration(queue.estimatedDrainS), queueClass) +
+    counterCard('Vaciado estimado', queue.estimatedDrainS == null ? 'desconocido' : fmtDuration(queue.estimatedDrainS), queueClass) +
     counterCard('Fallidos (24 h)', failed, failed ? 'err' : '') +
-    counterCard('Inciertos bloqueantes (24 h)', s.uncertain ?? 0, s.uncertain ? 'err' : '') +
+    counterCard(
+      'Bloqueo incierto',
+      queue.blockingUncertain ? `${queue.blockingUncertain} · ${fmtDuration(queue.blockingOldestS)}` : '0',
+      queue.blockingUncertain ? 'err' : '',
+    ) +
     counterCard('Resultado desconocido (24 h)', s.unresolved ?? 0, s.unresolved ? 'warn' : '') +
     counterCard('Suprimidos (24 h)', s.suppressed ?? 0);
   const providerCards = Object.entries(data.providers).map(([ch, h]) => {
@@ -131,7 +135,21 @@ async function loadDashboard() {
     : inboundFailed
       ? counterCard('Entrantes GOIP', 'poll fallido', 'err')
       : counterCard('Entrantes GOIP', `${inbox?.visible ?? 0} visibles`, 'ok');
-  $('#provider-health').innerHTML = providerCards + inboundCard;
+  const smsWorker = data.serviceHealth?.find((item) => item.component === 'sms_worker');
+  const workerState = smsWorker?.detail?.state ?? 'starting';
+  const workerStale = Number(smsWorker?.reference_age_s ?? 0) > 120;
+  const workerLabels = {
+    starting: 'iniciando', idle: 'activo', sending: 'enviando',
+    blocked_uncertain: 'esperando resultado', provider_unavailable: 'GOIP no disponible',
+    error: 'error', stopped: 'detenido',
+  };
+  const workerBad = workerStale || ['provider_unavailable', 'error', 'stopped'].includes(workerState);
+  const workerWarn = workerState === 'starting' || workerState === 'blocked_uncertain';
+  const workerCard = counterCard(
+    'Worker SMS', workerStale ? 'sin latido' : (workerLabels[workerState] ?? workerState),
+    workerBad ? 'err' : workerWarn ? 'warn' : 'ok',
+  );
+  $('#provider-health').innerHTML = providerCards + workerCard + inboundCard;
   $('#recent-table tbody').innerHTML = data.recent.map((n) => `
     <tr data-id="${n.id}">
       <td>${fmtDate(n.created_at)}</td><td>${esc(n.source)}</td>
@@ -402,6 +420,13 @@ const SETTING_META = {
   uncertain_poll_s: {
     section: 'Operación', label: 'Consulta de envío incierto', summary: 'Frecuencia de reconciliación del smskey pendiente.',
     detail: ['Mientras exista un uncertain no se envían nuevos SMS, porque el GOIP solo conserva el estado actual de la línea. Se expresa en segundos.'], min: 1,
+  },
+  uncertain_max_block_s: {
+    section: 'Operación', label: 'Bloqueo máximo por envío incierto', summary: 'Tiempo máximo que un smskey sin resultado puede detener el canal.',
+    detail: [
+      'Al vencer, la delivery queda como resultado desconocido y la cola continúa sin reenviar automáticamente el SMS.',
+      'Se mide desde la aceptación del GOIP. El valor inicial de 300 segundos deja un margen amplio sobre los tiempos observados.',
+    ], min: 60,
   },
   uncertain_without_smskey_retry_s: {
     section: 'Operación', label: 'Espera antes de reintento sin smskey', summary: 'Demora antes de un único reintento cuando GOIP no devolvió identificador.',

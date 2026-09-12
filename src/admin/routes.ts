@@ -99,7 +99,7 @@ export function registerAdminRoutes(
     const health: Record<string, unknown> = {};
     for (const [channel, provider] of providers) {
       try {
-        health[channel] = await withTimeout(provider.health(), 3000);
+        health[channel] = await withTimeout((signal) => provider.health(signal), 3000);
       } catch (err) {
         health[channel] = { ok: false, detail: { error: String(err) } };
       }
@@ -196,7 +196,8 @@ export function registerAdminRoutes(
         `UPDATE deliveries SET status = 'queued', attempts = 0, next_retry_at = now(),
            last_error = NULL, finished_at = NULL, locked_at = NULL,
            first_attempt_at = NULL, send_started_at = NULL, submitted_at = NULL, last_reconciled_at = NULL,
-           provider_id = NULL, provider_response = NULL
+           first_uncertain_at = NULL, first_uncertain_error = NULL, first_uncertain_response = NULL,
+           reconcile_count = 0, provider_id = NULL, provider_response = NULL
          WHERE id = $1 AND status IN ('failed', 'exhausted', 'expired', 'cancelled', 'suppressed')
          RETURNING id`,
         [req.params.id],
@@ -428,6 +429,7 @@ export function registerAdminRoutes(
         'retry_window_s',
         'unavailable_retry_s',
         'uncertain_poll_s',
+        'uncertain_max_block_s',
         'uncertain_without_smskey_retry_s',
         'inbound_poll_ms',
       ]);
@@ -516,13 +518,18 @@ export function registerAdminRoutes(
   });
 }
 
-async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error('timeout')), ms);
+    timer = setTimeout(() => {
+      const error = new Error('timeout');
+      controller.abort(error);
+      reject(error);
+    }, ms);
   });
   try {
-    return await Promise.race([p, timeout]);
+    return await Promise.race([operation(controller.signal), timeout]);
   } finally {
     clearTimeout(timer!);
   }

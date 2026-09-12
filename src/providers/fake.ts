@@ -6,6 +6,7 @@ export interface FakeBehavior {
   onSend?: (job: DeliveryJob) => SendResult;
   onReconcile?: (providerId: string) => SendResult;
   health?: HealthStatus;
+  runtimeState?: Record<string, unknown>;
 }
 
 /** Provider de desarrollo/tests: no envía nada, registra lo que "envió". */
@@ -50,6 +51,10 @@ export class FakeProvider implements ChannelProvider {
 
   async health(): Promise<HealthStatus> {
     return this.behavior.health ?? { ok: true, detail: { provider: 'fake' } };
+  }
+
+  runtimeState(): Record<string, unknown> {
+    return this.behavior.runtimeState ?? {};
   }
 
   /** bandeja de entrada simulada: los tests inyectan mensajes aquí */
